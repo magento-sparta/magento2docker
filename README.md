@@ -75,6 +75,10 @@ make web
    - Login to container `make web` 
    - Run `m2install.sh`
 
+### How to add Elastic Search
+   - run `make elastic7` from env
+   - use `magento2elastic7:9207`
+
 ## How to Enable xDebug
 
 The container already includes PHP xDebug extension. The xDebug extension is disabled by default because
