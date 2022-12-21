@@ -154,7 +154,7 @@ COPY ./etc/fixtures /etc/fixtures
 COPY ./etc/m2install/.m2install.conf* ${_HOME_DIRECTORY}/
 
 #MAGENTO TOOLS
-RUN curl -o /usr/local/bin/m2install.sh https://raw.githubusercontent.com/yvoronoy/m2install/master/m2install.sh \
+RUN curl -o /usr/local/bin/m2install.sh https://raw.githubusercontent.com/magento-sparta/m2install/master/m2install.sh \
     && curl -o /etc/bash_completion.d/m2install-bash-completion https://raw.githubusercontent.com/yvoronoy/m2install/master/m2install-bash-completion \
     && curl -o /usr/local/bin/n98-magerun2 https://files.magerun.net/n98-magerun2.phar \
     && curl -o /etc/bash_completion.d/n98-magerun2.phar.bash https://raw.githubusercontent.com/netz98/n98-magerun2/master/res/autocompletion/bash/n98-magerun2.phar.bash \
