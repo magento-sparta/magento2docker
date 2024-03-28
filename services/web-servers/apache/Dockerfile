@@ -120,11 +120,9 @@ RUN git ls-remote git@git.corp.adobe.com:magento-support/ee-support-tools.git 2>
 RUN git ls-remote git@git.corp.adobe.com:magento-support/cloud-tools.git 2>&1 | if grep -q HEAD; then \
     git clone git@git.corp.adobe.com:magento-support/cloud-tools.git /usr/local/src/cloud-tools; else echo; fi \
     && if [ -d /usr/local/src/cloud-tools ]; then \
-        ln -s /usr/local/src/cloud-tools/remote-shell.sh /usr/local/bin/cloud-ssh \
-        && ln -s /usr/local/src/cloud-tools/remote-copy.sh /usr/local/bin/cloud-scp \
-        && ln -s /usr/local/src/cloud-tools/dump.sh /usr/local/bin/cloud-dump \
-        && ln -s /usr/local/src/cloud-tools/healthcheck.sh /usr/local/bin/cloud-healthcheck \
-        && ln -s /usr/local/src/cloud-tools/patchcheck.sh /usr/local/bin/cloud-patchcheck; \
+        ln -s /usr/local/src/cloud-tools/cloud-dump /usr/local/bin/cloud-dump \
+        && ln -s /usr/local/src/cloud-tools/cloud-git-url /usr/local/bin/cloud-git-url \
+        && ln -s /usr/local/src/cloud-tools/cloud-patchcheck /usr/local/bin/cloud-patchcheck; \
     else echo; fi
 
 RUN git ls-remote git@github.com:magento-sparta/m-it.git 2>&1 | if grep -q HEAD; then git clone git@github.com:magento-sparta/m-it.git /usr/local/src/m-it; else echo; fi \
