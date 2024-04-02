@@ -107,15 +107,18 @@ ARG CACHEBUST=1
 RUN curl -o /usr/local/bin/n98-magerun2 https://files.magerun.net/n98-magerun2.phar; \
     curl -o /etc/bash_completion.d/n98-magerun2.phar.bash https://raw.githubusercontent.com/netz98/n98-magerun2/master/res/autocompletion/bash/n98-magerun2.phar.bash; \
     curl -o /usr/local/bin/m2-convert-for-composer https://raw.githubusercontent.com/isitnikov/m2-convert-patch-for-composer-install/master/convert-for-composer.php; \
-    curl -o /etc/bash_completion.d/magento2-bash-completion https://raw.githubusercontent.com/yvoronoy/magento2-bash-completion/master/magento2-bash-completion-enterprise; \
-    curl -L -o /tmp/teleport.tar.gz https://github.com/gravitational/teleport/releases/download/v1.3.2/teleport-v1.3.2-linux-amd64-bin.tar.gz \
-    && tar -xf /tmp/teleport.tar.gz -C /tmp/ \
-    && make -C /tmp/teleport/
+    curl -o /etc/bash_completion.d/magento2-bash-completion https://raw.githubusercontent.com/yvoronoy/magento2-bash-completion/master/magento2-bash-completion-enterprise
 
 # ADOBE TOOLS (as root):
 ## Internally we are using m2install from sparta:
 RUN curl -o /usr/local/bin/m2install.sh https://raw.githubusercontent.com/magento-sparta/m2install/master/m2install.sh; \
     curl -o /etc/bash_completion.d/m2install-bash-completion https://raw.githubusercontent.com/magento-sparta/m2install/master/m2install-bash-completion;
+
+# Install Percona Mydumper, it provides myloader utility used by m2install
+RUN apt-get install -y libatomic1; \
+    release=$(curl -Ls -o /dev/null -w %{url_effective} https://github.com/mydumper/mydumper/releases/latest | cut -d'/' -f8); \
+    wget https://github.com/mydumper/mydumper/releases/download/${release}/mydumper_${release:1}.$(lsb_release -cs)_amd64.deb; \
+    dpkg -i mydumper_${release:1}.$(lsb_release -cs)_amd64.deb
 
 RUN git ls-remote git@git.corp.adobe.com:magento-support/ee-support-tools.git 2>&1 | if grep -q HEAD; then git clone git@git.corp.adobe.com:magento-support/ee-support-tools.git /usr/local/src/ee-support-tools; else echo; fi \
     && if [ -d /usr/local/src/ee-support-tools ]; then ln -s /usr/local/src/ee-support-tools/cloud-teleport/cloud-teleport /usr/local/bin/cloud-teleport; else echo; fi
@@ -123,11 +126,9 @@ RUN git ls-remote git@git.corp.adobe.com:magento-support/ee-support-tools.git 2>
 RUN git ls-remote git@git.corp.adobe.com:magento-support/cloud-tools.git 2>&1 | if grep -q HEAD; then \
     git clone git@git.corp.adobe.com:magento-support/cloud-tools.git /usr/local/src/cloud-tools; else echo; fi \
     && if [ -d /usr/local/src/cloud-tools ]; then \
-        ln -s /usr/local/src/cloud-tools/remote-shell.sh /usr/local/bin/cloud-ssh \
-        && ln -s /usr/local/src/cloud-tools/remote-copy.sh /usr/local/bin/cloud-scp \
-        && ln -s /usr/local/src/cloud-tools/dump.sh /usr/local/bin/cloud-dump \
-        && ln -s /usr/local/src/cloud-tools/healthcheck.sh /usr/local/bin/cloud-healthcheck \
-        && ln -s /usr/local/src/cloud-tools/patchcheck.sh /usr/local/bin/cloud-patchcheck; \
+        ln -s /usr/local/src/cloud-tools/cloud-dump /usr/local/bin/cloud-dump \
+        && ln -s /usr/local/src/cloud-tools/cloud-git-url /usr/local/bin/cloud-git-url \
+        && ln -s /usr/local/src/cloud-tools/cloud-patchcheck /usr/local/bin/cloud-patchcheck; \
     else echo; fi
 
 RUN git ls-remote git@github.com:magento-sparta/m-it.git 2>&1 | if grep -q HEAD; then git clone git@github.com:magento-sparta/m-it.git /usr/local/src/m-it; else echo; fi \
