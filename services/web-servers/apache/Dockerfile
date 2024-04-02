@@ -60,8 +60,10 @@ ENV M2D_WEB_SERVER_PHP_MEMORY_LIMIT=${M2D_WEB_SERVER_PHP_MEMORY_LIMIT}
 COPY ./services/web-servers/apache/etc/php/* /usr/local/etc/php/conf.d/
 
 # NODEJS:
-RUN curl -sL https://deb.nodesource.com/setup_12.x | bash \
+RUN curl -sL https://deb.nodesource.com/setup_18.x | bash \
     && apt-get install -y nodejs
+
+RUN npm install --global yarn
 
 # INSTALL COMPOSER 1 AND COMPOSER 2:
 RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer1 --1 \
