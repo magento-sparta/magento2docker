@@ -118,10 +118,26 @@ RUN curl -o /usr/local/bin/m2install.sh https://raw.githubusercontent.com/magent
     curl -o /etc/bash_completion.d/m2install-bash-completion https://raw.githubusercontent.com/magento-sparta/m2install/master/m2install-bash-completion;
 
 # Install Percona Mydumper, it provides myloader utility used by m2install
-RUN apt-get install -y libatomic1; \
-    release=$(curl -Ls -o /dev/null -w %{url_effective} https://github.com/mydumper/mydumper/releases/latest | cut -d'/' -f8); \
-    wget https://github.com/mydumper/mydumper/releases/download/${release}/mydumper_${release:1}.$(lsb_release -cs)_amd64.deb; \
-    dpkg -i mydumper_${release:1}.$(lsb_release -cs)_amd64.deb
+#RUN apt-get install -y libatomic1; \
+#    release=$(curl -Ls -o /dev/null -w %{url_effective} https://github.com/mydumper/mydumper/releases/latest | cut -d'/' -f8); \
+#    wget https://github.com/mydumper/mydumper/releases/download/${release}/mydumper_${release:1}.$(lsb_release -cs)_amd64.deb; \
+#    dpkg -i mydumper_${release:1}.$(lsb_release -cs)_amd64.deb \
+
+# Install Mydumper from sources for compatibility with Apple M1-3 architecture
+RUN apt-get install -y libatomic1 lsb-release
+RUN apt-get -y install cmake g++ git
+RUN apt-get -y install libglib2.0-dev zlib1g-dev libpcre3-dev libssl-dev libzstd-dev
+RUN apt-get -y install libmariadb-dev-compat libmariadb-dev
+RUN apt-get -y install pip
+RUN pip install -U sphinx
+RUN wget -O mydumper.tar.gz https://github.com/mydumper/mydumper/archive/refs/tags/v0.16.1-3.tar.gz && \
+    tar xzf mydumper.tar.gz;
+COPY ./services/db-engines/mydumper/CMakeLists.txt mydumper-0.16.1-3/
+RUN cd mydumper-0.16.1-3 && \
+    ls -la && \
+    cmake . && \
+    make && \
+    make install;
 
 RUN git ls-remote git@git.corp.adobe.com:magento-support/ee-support-tools.git 2>&1 | if grep -q HEAD; then git clone git@git.corp.adobe.com:magento-support/ee-support-tools.git /usr/local/src/ee-support-tools; else echo; fi \
     && if [ -d /usr/local/src/ee-support-tools ]; then ln -s /usr/local/src/ee-support-tools/cloud-teleport/cloud-teleport /usr/local/bin/cloud-teleport; else echo; fi
