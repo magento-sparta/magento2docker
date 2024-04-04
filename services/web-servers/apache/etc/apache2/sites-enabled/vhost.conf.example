@@ -1,13 +1,61 @@
 <VirtualHost *:80>
-        ServerAdmin webmaster@localhost
-        ServerName example.com
-        ServerAlias www.example.com
-        DocumentRoot /var/www/html/example
-        <Directory /var/www/html/example/>
+    ServerAdmin webmaster@localhost
+    ServerName example.com
+    ServerAlias www.example.com
+    DocumentRoot /var/www/html/example
+    <Directory /var/www/html/example/>
+        Options -Indexes +FollowSymLinks +MultiViews
+        AllowOverride All
+        Require all granted
+    </Directory>
+    ErrorLog ${APACHE_LOG_DIR}/error.log
+    CustomLog ${APACHE_LOG_DIR}/access.log combined
+</VirtualHost>
+<VirtualHost *:443>
+    ServerAdmin webmaster@localhost
+    SSLEngine on
+    SSLCertificateFile "/var/www/html/cert.pem"
+    SSLCertificateKeyFile "/var/www/html/key.pem"
+    ServerName example.com
+    ServerAlias www.example.com
+    DocumentRoot /var/www/html/example
+    <Directory /var/www/html/example/>
+        Options -Indexes +FollowSymLinks +MultiViews
+        AllowOverride All
+        Require all granted
+    </Directory>
+    ErrorLog ${APACHE_LOG_DIR}/error.log
+    CustomLog ${APACHE_LOG_DIR}/access.log combined
+</VirtualHost>
+
+
+
+
+VARNISH:
+
+UseCanonicalName Off
+<VirtualHost *:80>
+    RequestHeader set X-Forwarded-Proto "https"
+	ServerAdmin webmaster@localhost
+        VirtualDocumentRoot /var/www/html/%-7+
+        <Directory //>
             Options -Indexes +FollowSymLinks +MultiViews
             AllowOverride All
             Require all granted
         </Directory>
-        ErrorLog ${APACHE_LOG_DIR}/error.log
-        CustomLog ${APACHE_LOG_DIR}/access.log combined
+	ErrorLog ${APACHE_LOG_DIR}/error.log
+	CustomLog ${APACHE_LOG_DIR}/access.log combined
+</VirtualHost>
+<VirtualHost *:443>
+	ServerAdmin webmaster@localhost
+    SSLEngine on
+    SSLCertificateFile "/var/www/html/cert.pem"
+    SSLCertificateKeyFile "/var/www/html/key.pem"
+
+    ProxyPreserveHost On
+    ProxyPass / http://web_cache:80/
+    ProxyPassReverse / http://web_cache:80/
+
+	ErrorLog ${APACHE_LOG_DIR}/error.log
+	CustomLog ${APACHE_LOG_DIR}/access.log combined
 </VirtualHost>

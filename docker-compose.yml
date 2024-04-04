@@ -96,9 +96,16 @@ services:
         - M2D_WEB_CACHE_VENDOR=${M2D_WEB_CACHE_VENDOR:-varnish}
         - M2D_WEB_CACHE_VERSION=${M2D_WEB_CACHE_VERSION:-6}
     container_name: "m2d-webcache${M2D_PROJECT_SUFFIX:-}"
+    volumes:
+      - "./services/web-cache/default.vcl:/etc/varnish/default.vcl"
+    tmpfs:
+      - /var/lib/varnish:exec
+    command: "-p default_keep=300"
+    depends_on:
+      - "web"
+    environment:
+      - VARNISH_SIZE=2G
     restart: unless-stopped
-    ports:
-      - "${M2D_PORT_FOR_WEB_CACHE:-8080}:8080"
 
   db_cache:
     build:
