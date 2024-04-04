@@ -92,6 +92,7 @@ RUN chmod -R 700 /root/.ssh \
 
 # APACHE:
 RUN a2enmod ssl \
+    && a2enmod headers \
     && a2ensite default-ssl.conf \
     && a2enmod vhost_alias \
     && a2enmod proxy \
