@@ -190,6 +190,7 @@ minica --domains '*.127.0.0.1.nip.io'
 That will generate two files:
 - `cert.pem`
 - `key.pem`
+
 Copy these files to your main directory `src/html`.
 
 You need to add `cert.pem` to your system keychains.
