@@ -24,6 +24,7 @@ Key features of the project:
  - [How to install a magento](#how-install-magento)
  - [How to deploy magento dumps/backups](#how-deploy-dumps)
 - [How to use xDebug](#how-to-enable-xdebug)
+- [How to use https](#how-to-use-https)
 - [How to use Blackfire](#how-to-start-using-blackfire)
  - [Pre-requirements](#pre-requirements-1)
  - [Usage](#usage-1)
@@ -169,6 +170,49 @@ it is dramatically decrease performance.
  - Run command `sudo xdebug-php.sh 1`
  - Run IDE (PHPStorm) and press button _Start Listening for PHPDebug Connection_
 
+## How to use https
+
+It requires two steps:
+1. Using local CA certificate.
+2. Changing the config in `m2install` to use https.
+
+### Using local CA certificate
+
+To use https install `minica`: \
+https://github.com/jsha/minica
+
+After installation this library, you need to generate the wildcard certificate:
+
+```bash
+minica --domains '*.127.0.0.1.nip.io'
+```
+
+That will generate two files:
+- `cert.pem`
+- `key.pem`
+Copy these files to your main directory `src/html`.
+
+You need to add `cert.pem` to your system keychains.
+1. On MacOS you can do it by opening the application Keychain Access (choose the option _Open Keychain Access_).
+2. Then drag and drop the file `cert.pem`.
+3. Double-click on the certificate *minica root ca 5b360b*.
+4. Expand _Trust_ section.
+5. In _When using this certificate:_ select _Always Trust_.
+
+### Changing the config in `m2install` to use https
+
+To change the configuration to use https, you can edit or create a file:
+```bash
+/home/magento/.m2install.conf
+```
+
+Add or modify the environment variable:
+
+```bash
+HTTP_HOST=https://${CURRENT_DIR_NAME}.127.0.0.1.nip.io/
+```
+
+The host should start from `https`, not `http`.
 
 ## Persistent folders
 ### Any file saved out of these folders will be lost when the container is terminated
