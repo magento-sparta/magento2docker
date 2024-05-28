@@ -174,7 +174,8 @@ it is dramatically decrease performance.
 
 It requires two steps:
 1. Using local CA certificate.
-2. Changing the config in `m2install` to use https.
+2. Adding 443 port to Apache.
+3. Changing the config in `m2install` to use https.
 
 ### Using local CA certificate
 
@@ -199,6 +200,35 @@ You need to add `cert.pem` to your system keychains.
 3. Double-click on the certificate *minica root ca 5b360b*.
 4. Expand _Trust_ section.
 5. In _When using this certificate:_ select _Always Trust_.
+
+### Adding 443 port to Apache
+
+Check if your SSL certificate is ready to use inside the container:
+```shell
+$ bin/m2d go web
+magento@b975beb70178:/var/www/html$ ls -la | grep cert.pem
+-rw-rw-r--   1 magento magento 1184 Jan 31 12:53 cert.pem
+```
+
+If you see the certificate, you can change the Apache configuration. Open two files:
+```
+web-servers/apache/etc/apache2/sites-enabled/000-default.conf
+web-servers/apache/etc/apache2/sites-enabled/second-level.nip.io.conf
+```
+And remove comments from the section:
+```
+#<VirtualHost *:443>
+# ...
+#</VirtualHost>
+```
+
+When you uncomment this section in both files, rebuild the container:
+
+```shell
+$ bin/m2d up --build
+```
+
+Now, your webserver is ready to use _https_ connections to the port 443.
 
 ### Changing the config in `m2install` to use https
 
