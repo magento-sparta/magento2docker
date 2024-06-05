@@ -139,9 +139,6 @@ RUN cd mydumper-0.16.1-3 && \
     make && \
     make install;
 
-RUN git ls-remote git@git.corp.adobe.com:magento-support/ee-support-tools.git 2>&1 | if grep -q HEAD; then git clone git@git.corp.adobe.com:magento-support/ee-support-tools.git /usr/local/src/ee-support-tools; else echo; fi \
-    && if [ -d /usr/local/src/ee-support-tools ]; then ln -s /usr/local/src/ee-support-tools/cloud-teleport/cloud-teleport /usr/local/bin/cloud-teleport; else echo; fi
-
 RUN git ls-remote git@git.corp.adobe.com:magento-support/cloud-tools.git 2>&1 | if grep -q HEAD; then \
     git clone git@git.corp.adobe.com:magento-support/cloud-tools.git /usr/local/src/cloud-tools; else echo; fi \
     && if [ -d /usr/local/src/cloud-tools ]; then \
