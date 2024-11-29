@@ -300,6 +300,9 @@ FROM m2d_web_server_apache_php8x AS m2d_web_server_apache_php8.1
 FROM m2d_web_server_apache_php8x AS m2d_web_server_apache_php8.2
 ## END OF IMAGE ADJUSTMENTS FOR PHP 8.2 ##
 
+## IMAGE ADJUSTEMNTS FOR PHP 8.3 ##
+FROM m2d_web_server_apache_php8x AS m2d_web_server_apache_php8.3
+## END OF IMAGE ADJUSTMENTS FOR PHP 8.3 ##
 
 ## TARGET IMAGE ADJUSTEMNTS ##
 FROM m2d_web_server_apache_php${M2D_WEB_SERVER_PHP_VERSION} AS web_server
