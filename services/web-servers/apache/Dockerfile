@@ -302,6 +302,9 @@ FROM m2d_web_server_apache_php8x AS m2d_web_server_apache_php8.2
 
 ## IMAGE ADJUSTEMNTS FOR PHP 8.3 ##
 FROM m2d_web_server_apache_php8x AS m2d_web_server_apache_php8.3
+# PHP EXTENSIONS GD:
+RUN docker-php-ext-configure ftp --with-openssl-dir=/usr \
+    && docker-php-ext-install ftp
 ## END OF IMAGE ADJUSTMENTS FOR PHP 8.3 ##
 
 ## TARGET IMAGE ADJUSTEMNTS ##
