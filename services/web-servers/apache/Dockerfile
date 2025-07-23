@@ -109,8 +109,15 @@ ARG CACHEBUST=1
 # MAGENTO TOOLS:
 RUN curl -o /usr/local/bin/n98-magerun2 https://files.magerun.net/n98-magerun2.phar; \
     curl -o /etc/bash_completion.d/n98-magerun2.phar.bash https://raw.githubusercontent.com/netz98/n98-magerun2/master/res/autocompletion/bash/n98-magerun2.phar.bash; \
-    curl -o /usr/local/bin/m2-convert-for-composer https://raw.githubusercontent.com/isitnikov/m2-convert-patch-for-composer-install/master/convert-for-composer.php; \
     curl -o /etc/bash_completion.d/magento2-bash-completion https://raw.githubusercontent.com/yvoronoy/magento2-bash-completion/master/magento2-bash-completion-enterprise
+
+RUN git ls-remote https://github.com/magento-sparta/m2-convert-patch-for-composer-install.git 2>&1 | if grep -q HEAD; then \
+        git clone https://github.com/magento-sparta/m2-convert-patch-for-composer-install.git /usr/local/src/m2-convert-for-composer; \
+    else echo; fi && \
+    if [ -d /usr/local/src/m2-convert-for-composer ]; then \
+        chmod +x /usr/local/src/m2-convert-for-composer/convert-for-composer.php && \
+        ln -s /usr/local/src/m2-convert-for-composer/convert-for-composer.php /usr/local/bin/m2-convert-for-composer; \
+    else echo; fi
 
 # ADOBE TOOLS (as root):
 ## Internally we are using m2install from sparta:
