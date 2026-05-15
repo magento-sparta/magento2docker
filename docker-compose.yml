@@ -22,6 +22,7 @@ services:
       - BASH_IT_THEME
       - MAGENTO_CLOUD_CLI_TOKEN
       - M2D_WEB_SERVER_PHP_MEMORY_LIMIT=${M2D_WEB_SERVER_PHP_MEMORY_LIMIT:-2G}
+      - M2D_APACHE_ROOT_DIRECTORY=${M2D_APACHE_ROOT_DIRECTORY:-/var/www/html}
       - "M2INSTALL_GIT_CE_REPO=${M2INSTALL_GIT_CE_REPO:-'git@github.com:magento/magento2.git'}"
       - "M2INSTALL_GIT_EE_REPO=${M2INSTALL_GIT_EE_REPO:-''}"
     ports:
@@ -55,6 +56,47 @@ services:
       - "${M2D_PORT_FOR_DB_ENGINE:-3306}:3306"
     volumes:
       - db-volume:/var/lib/mysql
+
+  db_slave:
+    build:
+      context: .
+      dockerfile: services/db-engines/Dockerfile
+      target: m2d_db_slave_engine
+      args:
+        - M2D_DB_ENGINE_VENDOR=${M2D_DB_ENGINE_VENDOR:-mariadb}
+        - M2D_DB_ENGINE_VERSION=${M2D_DB_ENGINE_VERSION:-10}
+    container_name: "m2d-db-slave${M2D_PROJECT_SUFFIX:-}"
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: magento
+      MYSQL_ALLOW_EMPTY_PASSWORD: 1
+      MYSQL_USER: magento
+      MYSQL_PASSWORD: magento
+    ports:
+      - "${M2D_PORT_FOR_DB_SLAVE_ENGINE:-3307}:3306"
+    volumes:
+      - db-slave-volume:/var/lib/mysql
+    depends_on:
+      - db
+
+  db_monitor:
+    build:
+      context: .
+      dockerfile: services/db-monitor/Dockerfile
+    container_name: "m2d-db-monitor${M2D_PROJECT_SUFFIX:-}"
+    restart: unless-stopped
+    environment:
+      - M2D_DB_MONITOR_INTERVAL=${M2D_DB_MONITOR_INTERVAL:-5}
+    ports:
+      - "${M2D_PORT_FOR_DB_MONITOR:-8099}:8080"
+    depends_on:
+      - db
+      - db_slave
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "200k"
+        max-file: "1"
 
   search_engine:
     build:
@@ -168,4 +210,5 @@ volumes:
   root-volume:
   src-volume:
   db-volume:
+  db-slave-volume:
   src-composer-cache-volume:

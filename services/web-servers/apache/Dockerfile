@@ -2,6 +2,11 @@ ARG M2D_WEB_SERVER_PHP_VERSION='8.1'
 ARG M2D_ENABLE_BLACKFIRE='no'
 ARG M2D_ENABLE_MAILCATCHER='no'
 
+## MINICA CERTIFICATE BUILDER ##
+FROM golang:1.22-bullseye AS minica_builder
+RUN go install github.com/jsha/minica@latest
+RUN mkdir /certs && cd /certs && minica --domains '*.127.0.0.1.nip.io'
+
 ## BASE PHP IMAGE - COMMON FOR ALL PHP VERSIONS ##
 FROM php:${M2D_WEB_SERVER_PHP_VERSION}-apache-bullseye AS m2d_web_server_apache_php_base
 
@@ -52,7 +57,7 @@ RUN useradd -m ${_USER} && echo "${_USER}:${_USER}" | chpasswd && chsh ${_USER} 
 
 # COMMON PHP EXTENSIONS:
 RUN docker-php-ext-install -j$(nproc) iconv soap sockets \
-    && docker-php-ext-install -j$(nproc) bcmath pdo_mysql xsl intl zip
+    && docker-php-ext-install -j$(nproc) bcmath pdo_mysql xsl intl zip pcntl
 
 # PHP CONFIG FILES:
 ARG M2D_WEB_SERVER_PHP_MEMORY_LIMIT='2G'
@@ -60,7 +65,7 @@ ENV M2D_WEB_SERVER_PHP_MEMORY_LIMIT=${M2D_WEB_SERVER_PHP_MEMORY_LIMIT}
 COPY ./services/web-servers/apache/etc/php/* /usr/local/etc/php/conf.d/
 
 # NODEJS:
-RUN curl -sL https://deb.nodesource.com/setup_18.x | bash \
+RUN curl -sL https://deb.nodesource.com/setup_20.x | bash \
     && apt-get install -y nodejs
 
 RUN npm install --global yarn
@@ -89,6 +94,12 @@ RUN chmod -R 700 /root/.ssh \
     && echo "Ciphers aes128-ctr,aes192-ctr,aes256-ctr,aes128-gcm@openssh.com,aes256-gcm@openssh.com,chacha20-poly1305@openssh.com,aes128-cbc,3des-cbc,aes192-cbc,aes256-cbc" >> /etc/ssh/sshd_config \
     && touch /root/.ssh/known_hosts \
     && ssh-keygen -F github.com || ssh-keyscan github.com >> /root/.ssh/known_hosts
+
+# MINICA CERTIFICATES:
+RUN mkdir -p /etc/apache2/ssl
+COPY --from=minica_builder /certs/_.127.0.0.1.nip.io/cert.pem /etc/apache2/ssl/cert.pem
+COPY --from=minica_builder /certs/_.127.0.0.1.nip.io/key.pem  /etc/apache2/ssl/key.pem
+COPY --from=minica_builder /certs/minica.pem                 /etc/apache2/ssl/minica.pem
 
 # APACHE:
 RUN a2enmod ssl \
@@ -176,7 +187,7 @@ RUN chown -R "${_USER}:${_USER}" ${_HOME_DIRECTORY}/.gitconfig ${_HOME_DIRECTORY
     chmod +x /usr/local/bin/*
 
 # CRONTAB
-RUN apt-get install -y cron && service cron start
+RUN apt-get update && apt-get install -y cron
 
 ## END OF BASE IMAGE ##
 
@@ -307,6 +318,18 @@ RUN docker-php-ext-configure ftp --with-openssl-dir=/usr \
     && docker-php-ext-install ftp
 ## END OF IMAGE ADJUSTMENTS FOR PHP 8.3 ##
 
+## IMAGE ADJUSTEMNTS FOR PHP 8.4 ##
+FROM m2d_web_server_apache_php8x AS m2d_web_server_apache_php8.4
+RUN docker-php-ext-install ftp
+## END OF IMAGE ADJUSTMENTS FOR PHP 8.4 ##
+
+
+## IMAGE ADJUSTEMNTS FOR PHP 8.5 ##
+FROM m2d_web_server_apache_php8x AS m2d_web_server_apache_php8.5
+RUN docker-php-ext-install ftp
+## END OF IMAGE ADJUSTMENTS FOR PHP 8.5 ##
+
+
 ## TARGET IMAGE ADJUSTEMNTS ##
 FROM m2d_web_server_apache_php${M2D_WEB_SERVER_PHP_VERSION} AS web_server
 # CODESNIFFER:
@@ -314,4 +337,4 @@ RUN pear install PHP_CodeSniffer \
     && mkdir /usr/local/magento-ecg-code-sniffer \
     && cd /usr/local/magento-ecg-code-sniffer/ && composer require magento-ecg/coding-standard \
     && phpcs --config-set installed_paths /usr/local/magento-ecg-code-sniffer/vendor/magento-ecg/coding-standard
-CMD service ssh start; apache2-foreground
+CMD service ssh start; service cron start; apache2-foreground
