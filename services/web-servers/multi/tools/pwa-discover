@@ -1,0 +1,137 @@
+#!/bin/bash
+# pwa-discover — locate compiled PWA Studio dist directories
+#
+# USAGE
+#   pwa-discover [path] [options]
+#
+# OPTIONS
+#   path               Directory to scan (default: current directory)
+#   --project PROJECT  Magento project name to associate with discovered dists
+#   --auto             Run pwa-install automatically for each found dist
+#   --depth N          Max scan depth (default: 4)
+#
+# DESCRIPTION
+#   Scans for compiled PWA Studio projects by looking for dist/upward.yml.
+#
+#   For each found dist, determines:
+#     - Whether it is already colocated inside a Magento project (uses --dir)
+#     - Or is an external path that needs copying in (uses --dist)
+#
+#   Prints the ready-to-run pwa-install command, or runs it with --auto.
+#
+# EXAMPLES
+#   # Scan current directory
+#   pwa-discover
+#
+#   # Scan a specific directory and auto-install
+#   pwa-discover /tmp/my-pwa-build --project 24dev --auto
+#
+#   # Scan for dists anywhere under the apache root
+#   pwa-discover /var/www/html
+
+set -e
+
+source /usr/local/bin/m2d-lib.sh
+
+APACHE_ROOT="${M2D_APACHE_ROOT_DIRECTORY:-/var/www/html}"
+SCAN_PATH="$PWD"
+PROJECT=""
+AUTO=0
+DEPTH=4
+
+usage() {
+    sed -n '2,/^set -e/p' "$0" | grep '^#' | sed 's/^# \?//'
+    exit "${1:-0}"
+}
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --project) PROJECT="$2"; shift 2 ;;
+        --auto)    AUTO=1;       shift   ;;
+        --depth)   DEPTH="$2";  shift 2 ;;
+        -h|--help) usage 0 ;;
+        -*) echo "Unknown option: $1"; usage 1 ;;
+        *)  SCAN_PATH="$1"; shift ;;
+    esac
+done
+
+SCAN_PATH=$(realpath "$SCAN_PATH" 2>/dev/null || echo "$SCAN_PATH")
+echo "[pwa-discover] scanning: $SCAN_PATH (depth: $DEPTH)"
+
+found=0
+
+while IFS= read -r upward_yml; do
+    dist_dir=$(dirname "$upward_yml")
+    pwa_dir=$(dirname "$dist_dir")
+
+    echo ""
+    echo "[pwa-discover] ── found ────────────────────────────────────────────"
+    echo "[pwa-discover] dist     : $pwa_dir/dist/"
+    echo "[pwa-discover] upward   : $upward_yml"
+
+    # ── Detect backend URL from .env ─────────────────────────────────────────
+    backend=""
+    if [[ -f "${pwa_dir}/.env" ]]; then
+        backend=$(grep "^MAGENTO_BACKEND_URL=" "${pwa_dir}/.env" 2>/dev/null | cut -d= -f2- | head -1)
+        [[ -n "$backend" ]] && echo "[pwa-discover] backend  : $backend"
+    fi
+
+    # ── Detect Magento project ────────────────────────────────────────────────
+    detected_project="$PROJECT"
+    if [[ -z "$detected_project" && "$pwa_dir" == "${APACHE_ROOT}/"* ]]; then
+        detected_project=$(echo "$pwa_dir" | sed "s|^${APACHE_ROOT}/||" | cut -d'/' -f1)
+        echo "[pwa-discover] project  : $detected_project (from path)"
+    elif [[ -n "$detected_project" ]]; then
+        echo "[pwa-discover] project  : $detected_project (from --project)"
+    else
+        echo "[pwa-discover] project  : (unknown — pass --project)"
+    fi
+
+    # ── Check if already configured ──────────────────────────────────────────
+    if [[ -n "$detected_project" && -f "${APACHE_ROOT}/${detected_project}/.pwa" ]]; then
+        existing_dir=$(grep "^PWA_DIR=" "${APACHE_ROOT}/${detected_project}/.pwa" 2>/dev/null | cut -d= -f2-)
+        if [[ "$existing_dir" == "$pwa_dir" ]]; then
+            echo "[pwa-discover] status   : already configured (pwa-install was run)"
+            found=$((found + 1))
+            continue
+        fi
+    fi
+
+    # ── Build pwa-install command ─────────────────────────────────────────────
+    # If the dist is already inside the target Magento project → use --dir
+    # If it is external                                         → use --dist
+    cmd="pwa-install"
+    [[ -n "$detected_project" ]] && cmd="$cmd $detected_project"
+
+    if [[ -n "$detected_project" && "$pwa_dir" == "${APACHE_ROOT}/${detected_project}/"* ]]; then
+        # Colocated — already in the right place, just register the dir
+        cmd="$cmd --dir ${pwa_dir}"
+    else
+        # External — pwa-install will rsync it into the project
+        cmd="$cmd --dist ${pwa_dir}"
+        [[ -n "$detected_project" ]] && cmd="$cmd --dir ${APACHE_ROOT}/${detected_project}/pwa"
+    fi
+
+    [[ -n "$backend" ]] && cmd="$cmd --backend $backend"
+
+    echo "[pwa-discover] command  : $cmd"
+
+    if [[ $AUTO -eq 1 ]]; then
+        if [[ -z "$detected_project" ]]; then
+            echo "[pwa-discover] skipping --auto: project name unknown (pass --project)"
+        else
+            echo "[pwa-discover] running pwa-install..."
+            eval "$cmd"
+        fi
+    fi
+
+    found=$((found + 1))
+done < <(find "$SCAN_PATH" -maxdepth "$DEPTH" -name "upward.yml" -path "*/dist/upward.yml" 2>/dev/null | sort)
+
+echo ""
+if [[ $found -eq 0 ]]; then
+    echo "[pwa-discover] no compiled PWA dists found"
+    echo "  A compiled dist contains dist/upward.yml — run 'yarn build' first."
+else
+    echo "[pwa-discover] found $found dist(s)"
+fi

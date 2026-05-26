@@ -1,0 +1,310 @@
+#!/bin/bash
+# pwa-install — set up a PWA Studio dev project inside magento2docker
+#
+# USAGE
+#   pwa-install <project> [options]
+#
+# OPTIONS
+#   --backend URL      Magento backend URL
+#                      (default: https://<project>.php<ver>.127.0.0.1.nip.io/pub/)
+#                      PWA Studio appends "graphql" to this URL, so it must end
+#                      with the path segment before graphql (usually "pub/").
+#   --edition CE|AC    Magento edition: CE (Community) or AC (Adobe Commerce).
+#                      Auto-detected from composer.json when not supplied.
+#   --braintree TOKEN  Braintree API token written to .env
+#                      (default: sandbox_8yrzsvtm_s2bg8fs563crhqzk)
+#   --dir PATH         Absolute path where the PWA project will live.
+#                      (default: <apache-root>/<project>/pwa when run from inside
+#                      the project dir, otherwise <apache-root>/<project>-pwa)
+#   --dist PATH        Path to an existing PWA project directory or .tar.gz archive.
+#                      When supplied, contents are copied/extracted instead of
+#                      scaffolding a new project with yarn create.
+#   --reset            Remove node_modules/ and dist/ before installing (clean reinstall)
+#   --start            Start the dev server immediately after install
+#
+# EXAMPLES
+#   # New project, scaffold from @magento/venia-concept:
+#   pwa-install 24dev --backend https://24dev.php84.127.0.0.1.nip.io/pub/
+#
+#   # Adobe Commerce project:
+#   pwa-install 24dev --edition AC
+#
+#   # Inside the Magento project directory:
+#   pwa-install 24dev --dir /var/www/html/24dev/pwa --start
+#
+#   # From a checked-out dist directory:
+#   pwa-install 24dev --dist /var/www/html/24dev/pwa-src --start
+#
+#   # From a tarball, colocated inside Magento root:
+#   pwa-install 24dev --dist pwa.tar.gz --dir /var/www/html/24dev/pwa --start
+#
+# ACCESS URL (after pwa-start)
+#   https://pwa-<project>.<phpver>.127.0.0.1.nip.io/
+#   e.g. https://pwa-myproject.php84.127.0.0.1.nip.io/
+
+set -e
+
+source /usr/local/bin/m2d-lib.sh
+
+APACHE_ROOT="${M2D_APACHE_ROOT_DIRECTORY:-/var/www/html}"
+PWA_LOG_DIR="/var/log/pwa"
+
+# ── Argument parsing ──────────────────────────────────────────────────────────
+
+usage() {
+    sed -n '2,/^set -e/p' "$0" | grep '^#' | sed 's/^# \?//'
+    exit "${1:-0}"
+}
+
+PROJECT=""
+BACKEND_URL=""
+EDITION=""
+BRAINTREE_TOKEN=""
+CUSTOM_DIR=""
+DIST_PATH=""
+AUTO_START=0
+RESET=0
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --backend)   BACKEND_URL="$2";    shift 2 ;;
+        --edition)   EDITION="$2";        shift 2 ;;
+        --braintree) BRAINTREE_TOKEN="$2"; shift 2 ;;
+        --dir)       CUSTOM_DIR="$2";     shift 2 ;;
+        --dist)      DIST_PATH="$2";      shift 2 ;;
+        --reset)     RESET=1;             shift   ;;
+        --start)     AUTO_START=1;        shift   ;;
+        -h|--help)   usage 0 ;;
+        -*)          echo "Unknown option: $1"; usage 1 ;;
+        *)           PROJECT="$1"; shift ;;
+    esac
+done
+
+# Auto-detect project name from cwd when not supplied
+if [[ -z "$PROJECT" ]]; then
+    if [[ "$PWD" == "${APACHE_ROOT}/"* ]]; then
+        PROJECT=$(echo "$PWD" | sed "s|^${APACHE_ROOT}/||" | cut -d'/' -f1)
+        echo "[pwa-install] detected project: $PROJECT"
+    else
+        echo "Error: project name required (or run from inside the project directory)."
+        usage 1
+    fi
+fi
+
+MAGENTO_ROOT="${APACHE_ROOT}/${PROJECT}"
+
+# Detect PHP version for this project (meta.json → .code.tgz → env default)
+detect_php "$MAGENTO_ROOT"
+echo "[pwa-install] php        : $PHP_BIN ($PHP_VERSION) [source: $PHP_DETECTED_FROM]"
+
+# ── Edition detection ─────────────────────────────────────────────────────────
+# Explicit --edition wins; otherwise sniff composer.json "name" field.
+if [[ -z "$EDITION" ]]; then
+    _cjson="${MAGENTO_ROOT}/composer.json"
+    if [[ -f "$_cjson" ]]; then
+        _cname=$(python3 -c "
+import json,sys
+try:
+    print(json.load(open(sys.argv[1])).get('name',''))
+except Exception:
+    pass
+" "$_cjson" 2>/dev/null || true)
+        case "$_cname" in
+            *enterprise*|*commerce*|*adobe*|*cloud*) EDITION="AC" ;;
+        esac
+    fi
+    # Fallback: presence of AC-specific vendor modules
+    if [[ -z "$EDITION" ]]; then
+        if [[ -d "${MAGENTO_ROOT}/vendor/magento/module-adobe-ims" ]] || \
+           [[ -d "${MAGENTO_ROOT}/vendor/magento/module-b2b" ]]; then
+            EDITION="AC"
+        fi
+    fi
+    EDITION="${EDITION:-CE}"
+fi
+
+echo "[pwa-install] edition    : $EDITION"
+
+# ── Directory + URL defaults ──────────────────────────────────────────────────
+if [[ -n "$CUSTOM_DIR" ]]; then
+    PWA_DIR="$CUSTOM_DIR"
+elif [[ "$PWD" == "${MAGENTO_ROOT}" || "$PWD" == "${MAGENTO_ROOT}/"* ]]; then
+    PWA_DIR="${MAGENTO_ROOT}/pwa"
+else
+    PWA_DIR="${APACHE_ROOT}/${PROJECT}-pwa"
+fi
+
+if [[ -z "$BACKEND_URL" ]]; then
+    BASE="https://${PROJECT}.${PHP_SEGMENT}.127.0.0.1.nip.io"
+    if [[ -f "${MAGENTO_ROOT}/pub/index.php" ]]; then
+        BACKEND_URL="${BASE}/pub/"
+    else
+        BACKEND_URL="${BASE}/"
+    fi
+fi
+
+BRAINTREE_TOKEN="${BRAINTREE_TOKEN:-sandbox_8yrzsvtm_s2bg8fs563crhqzk}"
+
+# ── Write project meta ────────────────────────────────────────────────────────
+
+META_FILE="${MAGENTO_ROOT}/.pwa"
+mkdir -p "$PWA_LOG_DIR"
+
+cat > "$META_FILE" <<META
+PWA_DIR=${PWA_DIR}
+META
+
+echo "[pwa-install] project  : $PROJECT"
+echo "[pwa-install] directory: $PWA_DIR"
+echo "[pwa-install] backend  : $BACKEND_URL"
+
+# ── Write .env ────────────────────────────────────────────────────────────────
+# Always regenerated so stale values never survive a reinstall.
+
+mkdir -p "$PWA_DIR"
+ENV_FILE="${PWA_DIR}/.env"
+cat > "$ENV_FILE" <<ENV
+# Generated by pwa-install — edit to taste, then run: pwa-start ${PROJECT}
+
+MAGENTO_BACKEND_URL=${BACKEND_URL}
+MAGENTO_BACKEND_EDITION=${EDITION}
+STORE_VIEW_CODE=
+
+# Dev server (port is assigned and injected by pwa-start)
+DEV_SERVER_HOST=127.0.0.1
+
+# Docker volume polling (replaces inotify which doesn't work on bind mounts)
+DEV_SERVER_WATCH_OPTIONS_USE_POLLING=500
+
+# Allow self-signed minica cert from the Magento backend
+NODE_TLS_REJECT_UNAUTHORIZED=0
+
+# Braintree token (replace with a real token for payment testing)
+CHECKOUT_BRAINTREE_TOKEN=${BRAINTREE_TOKEN}
+
+# Compression off for dev (speeds up HMR)
+ENABLE_EXPRESS_SERVER_COMPRESSION=false
+ENV
+echo "[pwa-install] .env written: $ENV_FILE"
+
+# ── Reset ─────────────────────────────────────────────────────────────────────
+
+if [[ $RESET -eq 1 ]]; then
+    echo "[pwa-install] --reset: removing node_modules/ and dist/..."
+    rm -rf "${PWA_DIR}/node_modules" "${PWA_DIR}/dist"
+fi
+
+# ── Install / scaffold ────────────────────────────────────────────────────────
+
+if [[ -n "$DIST_PATH" ]]; then
+    # ── From existing dist (directory or tarball) ─────────────────────────────
+    mkdir -p "$PWA_DIR"
+
+    if [[ -f "$DIST_PATH" ]]; then
+        echo "[pwa-install] extracting: $DIST_PATH"
+        tar xzf "$DIST_PATH" -C "$PWA_DIR" --strip-components=1 2>/dev/null \
+            || tar xf "$DIST_PATH" -C "$PWA_DIR" --strip-components=1
+    elif [[ -d "$DIST_PATH" ]]; then
+        echo "[pwa-install] syncing from: $DIST_PATH"
+        run_as_magento rsync -a --delete \
+            --exclude='.env' \
+            --exclude='node_modules/' \
+            --exclude='dist/' \
+            "$DIST_PATH/" "$PWA_DIR/"
+    else
+        echo "Error: --dist path not found: $DIST_PATH"
+        exit 1
+    fi
+
+    echo "[pwa-install] running yarn install..."
+    cd "$PWA_DIR" && run_as_magento yarn install 2>&1 | tee "${PWA_LOG_DIR}/${PROJECT}-install.log"
+
+else
+    # ── Scaffold from scratch via @magento/create-pwa ────────────────────────
+    if [[ -d "$PWA_DIR/node_modules" ]]; then
+        echo "[pwa-install] node_modules found — skipping scaffold (already installed)"
+        echo "[pwa-install] Tip: use --reset to force a clean reinstall"
+    elif [[ -f "$PWA_DIR/package.json" ]]; then
+        echo "[pwa-install] package.json found — running yarn install only"
+        cd "$PWA_DIR" && run_as_magento yarn install 2>&1 | tee "${PWA_LOG_DIR}/${PROJECT}-install.log"
+    else
+        echo "[pwa-install] scaffolding new PWA Studio project (Venia Concept)..."
+        mkdir -p "$PWA_DIR"
+        # The directory was created as root; transfer ownership so the magento
+        # user (run_as_magento) can write into it during scaffold.
+        chown magento:magento "$PWA_DIR" 2>/dev/null || true
+        # cd to parent so the scaffold lands in the right place (first arg is dirname)
+        cd "$(dirname "$PWA_DIR")"
+        # buildpack create-project takes:
+        #   <directory>          positional — project dir name
+        #   --name               package.json "name" field
+        #   --author             package.json "author" field
+        #   --template           scaffold template package
+        #   --backend-url        written to .env MAGENTO_BACKEND_URL
+        #   --backend-edition    CE or AC — written to .env MAGENTO_BACKEND_EDITION
+        #   --braintree-token    written to .env CHECKOUT_BRAINTREE_TOKEN
+        #   --npm-client         yarn or npm
+        #
+        # @magento/create-pwa always shows interactive prompts even when all
+        # flags are supplied (flags set defaults only).  Pipe the directory name
+        # for the first prompt (which validates non-empty) then `yes ""` to
+        # accept every subsequent default — the flags we pass ARE the values.
+        #
+        # The yarn/buildpack template cache under /tmp may be root-owned from a
+        # prior run; remove it so it's freshly created as the magento user.
+        rm -rf /tmp/@magento 2>/dev/null || true
+        { printf '%s\n' "$(basename "$PWA_DIR")"; yes ""; } 2>/dev/null | \
+        run_as_magento yarn create @magento/pwa \
+            "$(basename "$PWA_DIR")" \
+            --name             "${PROJECT}-pwa" \
+            --author           "magento2docker" \
+            --template         "@magento/venia-concept" \
+            --backend-url      "${BACKEND_URL}" \
+            --backend-edition  "${EDITION}" \
+            --braintree-token  "${BRAINTREE_TOKEN}" \
+            --npm-client       "yarn" \
+            2>&1 | tee "${PWA_LOG_DIR}/${PROJECT}-install.log" \
+        || {
+            echo "[pwa-install] Warning: scaffold exited non-zero; check log at ${PWA_LOG_DIR}/${PROJECT}-install.log"
+        }
+
+        # buildpack create-project overwrites .env with values it collected
+        # from the interactive prompts (which may differ from our flags).
+        # Re-write .env now so our values always win.
+        cat > "$ENV_FILE" <<ENV
+# Generated by pwa-install — edit to taste, then run: pwa-start ${PROJECT}
+
+MAGENTO_BACKEND_URL=${BACKEND_URL}
+MAGENTO_BACKEND_EDITION=${EDITION}
+STORE_VIEW_CODE=
+
+# Dev server (port is assigned and injected by pwa-start)
+DEV_SERVER_HOST=127.0.0.1
+
+# Docker volume polling (replaces inotify which doesn't work on bind mounts)
+DEV_SERVER_WATCH_OPTIONS_USE_POLLING=500
+
+# Allow self-signed minica cert from the Magento backend
+NODE_TLS_REJECT_UNAUTHORIZED=0
+
+# Braintree token (replace with a real token for payment testing)
+CHECKOUT_BRAINTREE_TOKEN=${BRAINTREE_TOKEN}
+
+# Compression off for dev (speeds up HMR)
+ENABLE_EXPRESS_SERVER_COMPRESSION=false
+ENV
+        echo "[pwa-install] .env re-written after scaffold: $ENV_FILE"
+    fi
+fi
+
+chown -R magento:magento "$PWA_DIR" 2>/dev/null || true
+
+echo ""
+echo "[pwa-install] Done!"
+echo "  Luma : https://${PROJECT}.${PHP_SEGMENT}.127.0.0.1.nip.io/"
+echo "  PWA  : https://pwa-${PROJECT}.${PHP_SEGMENT}.127.0.0.1.nip.io/"
+echo ""
+echo "  Dev server (Node):    pwa-start ${PROJECT}"
+echo "  UPWARD-PHP (no Node): pwa-build ${PROJECT}"
+
+[[ $AUTO_START -eq 1 ]] && exec pwa-start "$PROJECT" || true

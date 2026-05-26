@@ -1,0 +1,149 @@
+#!/bin/bash
+# pwa-start — start the PWA Studio dev server for a project
+#
+# USAGE
+#   pwa-start [project] [--port PORT]
+#
+# OPTIONS
+#   --port PORT   Force a specific dev-server port (default: auto-assigned
+#                 starting from 10001, incremented per project; reused on restart)
+#
+# DESCRIPTION
+#   Allocates (or reuses) a port for the dev server, registers it in the Apache
+#   RewriteMap, then starts the Node process in the background.
+#   Logs to /var/log/pwa/<project>.log.
+#
+#   Run pwa-install first to scaffold the project and create the .env file.
+#   Project name is auto-detected when run from inside the project directory.
+#
+# ACCESS URL
+#   https://pwa-<project>.<phpver>.127.0.0.1.nip.io/
+
+set -e
+
+source /usr/local/bin/m2d-lib.sh
+
+APACHE_ROOT="${M2D_APACHE_ROOT_DIRECTORY:-/var/www/html}"
+PWA_BASE_PORT=10001
+
+usage() {
+    sed -n '2,/^set -e/p' "$0" | grep '^#' | sed 's/^# \?//'
+    exit "${1:-0}"
+}
+
+FORCE_PORT=""
+PROJECT=""
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --port)    FORCE_PORT="$2"; shift 2 ;;
+        -h|--help) usage 0 ;;
+        -*)        echo "Unknown option: $1"; usage 1 ;;
+        *)         PROJECT="$1"; shift ;;
+    esac
+done
+
+if [[ -z "$PROJECT" ]]; then
+    if [[ "$PWD" == "${APACHE_ROOT}/"* ]]; then
+        PROJECT=$(echo "$PWD" | sed "s|^${APACHE_ROOT}/||" | cut -d'/' -f1)
+    else
+        echo "Error: project name required (or run from inside the project directory)."
+        usage 1
+    fi
+fi
+
+detect_php "${APACHE_ROOT}/${PROJECT}"
+
+# ── Load project meta ─────────────────────────────────────────────────────────
+
+META_FILE="${APACHE_ROOT}/${PROJECT}/.pwa"
+if [[ ! -f "$META_FILE" ]]; then
+    echo "[pwa-start] Error: no .pwa meta file for '${PROJECT}'."
+    echo "  Run: pwa-install ${PROJECT}"
+    exit 1
+fi
+
+PWA_DIR=$(grep "^PWA_DIR=" "$META_FILE" | cut -d= -f2-)
+
+# ── Port allocation ───────────────────────────────────────────────────────────
+# Reuse existing port (set by a previous pwa-start) so the Apache map entry
+# stays stable across restarts; allocate a new one on first run.
+
+existing_port=$(grep "^PWA_PORT=" "$META_FILE" 2>/dev/null | cut -d= -f2 || true)
+
+if [[ -n "$FORCE_PORT" ]]; then
+    PORT="$FORCE_PORT"
+elif [[ -n "$existing_port" ]]; then
+    PORT="$existing_port"
+else
+    last_port=$(grep -h "^PWA_PORT=" "${APACHE_ROOT}"/*/.pwa 2>/dev/null | cut -d= -f2 | sort -n | tail -1 || true)
+    PORT=$(( ${last_port:-$((PWA_BASE_PORT - 1))} + 1 ))
+fi
+
+# Persist port in meta so restarts reuse the same one
+grep -v "^PWA_PORT=" "$META_FILE" > "${META_FILE}.tmp" && mv "${META_FILE}.tmp" "$META_FILE"
+echo "PWA_PORT=${PORT}" >> "$META_FILE"
+
+PWA_LOG_DIR="/var/log/pwa"
+PID_FILE="/var/run/pwa/${PROJECT}.pid"
+
+# ── Sanity checks ─────────────────────────────────────────────────────────────
+
+if [[ ! -d "$PWA_DIR" ]]; then
+    echo "[pwa-start] Error: $PWA_DIR not found."
+    echo "  Run: pwa-install ${PROJECT}"
+    exit 1
+fi
+
+# ── Already running? ──────────────────────────────────────────────────────────
+
+if [[ -f "$PID_FILE" ]]; then
+    pid=$(cat "$PID_FILE")
+    if kill -0 "$pid" 2>/dev/null; then
+        echo "[pwa-start] already running (pid $pid, port $PORT)"
+        exit 0
+    else
+        rm -f "$PID_FILE"
+    fi
+fi
+
+# ── Register port in Apache RewriteMap ───────────────────────────────────────
+
+PWA_PORTS_MAP="/usr/local/etc/pwa-ports.map"
+mkdir -p /usr/local/etc
+touch "$PWA_PORTS_MAP"
+sed -i "/^${PROJECT} /d" "$PWA_PORTS_MAP" 2>/dev/null || true
+echo "${PROJECT} ${PORT}" >> "$PWA_PORTS_MAP"
+
+# ── Start dev server ──────────────────────────────────────────────────────────
+
+mkdir -p "$PWA_LOG_DIR"
+mkdir -p "$(dirname "$PID_FILE")"
+cd "$PWA_DIR"
+
+if grep -q '"watch"' package.json 2>/dev/null; then
+    WATCH_CMD="yarn watch"
+else
+    WATCH_CMD="yarn start"
+fi
+
+echo "[pwa-start] starting $PROJECT on port $PORT (cmd: $WATCH_CMD)"
+echo "[pwa-start] log: ${PWA_LOG_DIR}/${PROJECT}.log"
+
+# setsid creates a new process group (pgid = pid of the leader) so that
+# pwa-stop can kill the entire tree (su → bash → yarn → webpack) with
+# a single process-group signal rather than just the top-level process.
+if [[ "$(id -u)" -eq 0 ]] && id magento &>/dev/null; then
+    setsid su -s /bin/bash magento -c "cd '$PWA_DIR' && NODE_OPTIONS=--openssl-legacy-provider DEV_SERVER_PORT=$PORT $WATCH_CMD" \
+        > "${PWA_LOG_DIR}/${PROJECT}.log" 2>&1 &
+else
+    setsid bash -c "cd '$PWA_DIR' && NODE_OPTIONS=--openssl-legacy-provider DEV_SERVER_PORT=$PORT $WATCH_CMD" \
+        > "${PWA_LOG_DIR}/${PROJECT}.log" 2>&1 &
+fi
+
+echo $! > "$PID_FILE"
+echo "[pwa-start] pid $!"
+
+apache2ctl graceful 2>/dev/null || true
+
+echo "[pwa-start] https://pwa-${PROJECT}.${PHP_SEGMENT}.127.0.0.1.nip.io/"

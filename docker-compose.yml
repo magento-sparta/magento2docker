@@ -31,9 +31,9 @@ services:
       - "${M2D_PORT_FOR_WEB_SERVER_SSH:-2222}:22"
     volumes:
       - src-volume:/var/www/html
-      - src-composer-cache-volume:/root/.composer/cache
-      - home-volume:/home
-      - root-volume:/root
+      - ${M2D_WEB_SERVER_VENDOR}-src-composer-cache-volume:/root/.composer/cache
+      - ${M2D_WEB_SERVER_VENDOR}-home-volume:/home
+      - ${M2D_WEB_SERVER_VENDOR}-root-volume:/root
     cap_add:
       - "SYS_PTRACE"
 
@@ -206,9 +206,12 @@ networks:
     name: "m2d-network${M2D_PROJECT_SUFFIX:-}"
 
 volumes:
-  home-volume:
-  root-volume:
   src-volume:
+  apache-home-volume:
+  apache-root-volume:
+  apache-src-composer-cache-volume:
+  multi-home-volume:
+  multi-root-volume:
+  multi-src-composer-cache-volume:
   db-volume:
   db-slave-volume:
-  src-composer-cache-volume:

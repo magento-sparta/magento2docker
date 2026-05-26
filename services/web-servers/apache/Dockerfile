@@ -57,7 +57,7 @@ RUN useradd -m ${_USER} && echo "${_USER}:${_USER}" | chpasswd && chsh ${_USER} 
 
 # COMMON PHP EXTENSIONS:
 RUN docker-php-ext-install -j$(nproc) iconv soap sockets \
-    && docker-php-ext-install -j$(nproc) bcmath pdo_mysql xsl intl zip pcntl
+    && docker-php-ext-install -j$(nproc) bcmath pdo_mysql xsl intl zip
 
 # PHP CONFIG FILES:
 ARG M2D_WEB_SERVER_PHP_MEMORY_LIMIT='2G'
@@ -99,7 +99,7 @@ RUN chmod -R 700 /root/.ssh \
 RUN mkdir -p /etc/apache2/ssl
 COPY --from=minica_builder /certs/_.127.0.0.1.nip.io/cert.pem /etc/apache2/ssl/cert.pem
 COPY --from=minica_builder /certs/_.127.0.0.1.nip.io/key.pem  /etc/apache2/ssl/key.pem
-COPY --from=minica_builder /certs/minica.pem                 /etc/apache2/ssl/minica.pem
+COPY --from=minica_builder /certs/minica.pem                   /etc/apache2/ssl/minica.pem
 
 # APACHE:
 RUN a2enmod ssl \
@@ -173,7 +173,8 @@ COPY ./services/web-servers/apache/etc/composer/auth.json* ${_HOME_DIRECTORY}/.c
 COPY ./services/web-servers/apache/etc/m2install/.m2install.conf* ${_HOME_DIRECTORY}/
 
 # BASH COMPLETION:
-RUN echo "source /etc/bash_completion" >> ${_HOME_DIRECTORY}/.bashrc
+RUN echo "source /etc/bash_completion" >> ${_HOME_DIRECTORY}/.bashrc \
+    && echo 'export PHP_IDE_CONFIG="serverName=host.docker.internal"' >> ${_HOME_DIRECTORY}/.bashrc
 
 # MAGENTO CLI:
 RUN curl -sS https://accounts.magento.cloud/cli/installer | php
@@ -187,7 +188,7 @@ RUN chown -R "${_USER}:${_USER}" ${_HOME_DIRECTORY}/.gitconfig ${_HOME_DIRECTORY
     chmod +x /usr/local/bin/*
 
 # CRONTAB
-RUN apt-get update && apt-get install -y cron
+RUN apt-get install -y cron && service cron start
 
 ## END OF BASE IMAGE ##
 
@@ -264,15 +265,15 @@ RUN ln -s /usr/local/bin/composer2 /usr/local/bin/composer
 ARG M2D_XDEBUG_IDE_KEY=PHPSTORM
 ENV M2D_XDEBUG_IDE_KEY=${M2D_XDEBUG_IDE_KEY:-PHPSTORM}
 RUN pecl install xdebug \
-    && echo ";zend_extension=xdebug.so" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini \
+    && echo "zend_extension=xdebug.so" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini \
     && echo "xdebug.idekey=$M2D_XDEBUG_IDE_KEY" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini \
     && echo "xdebug.client_host=host.docker.internal" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini \
     && echo "xdebug.mode=debug" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini \
     && echo "xdebug.start_with_request=yes" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini \
     && echo "xdebug.max_nesting_level=10000" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini \
+    && echo "xdebug.log_level=0" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini \
     && echo ";xdebug.log = /var/www/html/xdebug.log" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini \
-    && echo ";xdebug.log_level = 10" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini \
-    && echo ";xdebug.client_port = 9003" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini
+    && echo "xdebug.client_port = 9003" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini
 ## END OF IMAGE ADJUSTMENTS FOR PHP 8.x ##
 
 
@@ -320,15 +321,7 @@ RUN docker-php-ext-configure ftp --with-openssl-dir=/usr \
 
 ## IMAGE ADJUSTEMNTS FOR PHP 8.4 ##
 FROM m2d_web_server_apache_php8x AS m2d_web_server_apache_php8.4
-RUN docker-php-ext-install ftp
 ## END OF IMAGE ADJUSTMENTS FOR PHP 8.4 ##
-
-
-## IMAGE ADJUSTEMNTS FOR PHP 8.5 ##
-FROM m2d_web_server_apache_php8x AS m2d_web_server_apache_php8.5
-RUN docker-php-ext-install ftp
-## END OF IMAGE ADJUSTMENTS FOR PHP 8.5 ##
-
 
 ## TARGET IMAGE ADJUSTEMNTS ##
 FROM m2d_web_server_apache_php${M2D_WEB_SERVER_PHP_VERSION} AS web_server
@@ -337,4 +330,4 @@ RUN pear install PHP_CodeSniffer \
     && mkdir /usr/local/magento-ecg-code-sniffer \
     && cd /usr/local/magento-ecg-code-sniffer/ && composer require magento-ecg/coding-standard \
     && phpcs --config-set installed_paths /usr/local/magento-ecg-code-sniffer/vendor/magento-ecg/coding-standard
-CMD service ssh start; service cron start; apache2-foreground
+CMD service ssh start; apache2-foreground

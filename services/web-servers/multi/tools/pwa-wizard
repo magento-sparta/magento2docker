@@ -1,0 +1,475 @@
+#!/bin/bash
+# pwa-wizard — interactive PWA Studio setup guide
+#
+# USAGE
+#   pwa-wizard [project] [options]
+#
+# OPTIONS
+#   --mode dev|upward|both   Pre-select mode (skips prompt)
+#   --backend URL            Backend URL (skips prompt)
+#   --dir PATH               PWA directory (skips prompt)
+#   --dist PATH              Existing dir or .tar.gz to sync from
+#   --yes                    Auto-confirm all prompts (use defaults)
+#
+# DESCRIPTION
+#   Detects what is already configured and walks through only the
+#   missing steps. Shows the manual command before each step so you
+#   can copy-paste it instead of letting the wizard run it.
+#
+#   Modes:
+#     dev      Node.js dev server  → https://pwa-<project>.<php>.127.0.0.1.nip.io/
+#     upward   UPWARD-PHP, no Node → https://<project>.<php>.127.0.0.1.nip.io/
+#     both     Install once, use either
+#
+#   Individual tools for manual setup:
+#     pwa-install   scaffold or sync a PWA project
+#     pwa-start     start the Node dev server
+#     pwa-stop      stop the Node dev server
+#     pwa-build     yarn build + wire UPWARD-PHP into Magento
+#     pwa-status    show status of all configured projects
+#     pwa-logs      tail the dev server log
+#     pwa-discover  find compiled dists on the filesystem
+
+set -e
+
+source /usr/local/bin/m2d-lib.sh
+
+APACHE_ROOT="${M2D_APACHE_ROOT_DIRECTORY:-/var/www/html}"
+
+# ── Terminal decoration ───────────────────────────────────────────────────────
+
+if [[ -t 1 ]]; then
+    R=$'\033[0m' B=$'\033[1m' DIM=$'\033[2m'
+    GRN=$'\033[0;32m' YLW=$'\033[0;33m' CYN=$'\033[0;36m' RED=$'\033[0;31m'
+else
+    R='' B='' DIM='' GRN='' YLW='' CYN='' RED=''
+fi
+
+ok()    { echo "  ${GRN}✓${R} $*"; }
+warn()  { echo "  ${YLW}!${R} $*"; }
+fail()  { echo "  ${RED}✗${R} $*"; }
+note()  { echo "  ${DIM}→${R} $*"; }
+hint()  { echo "  ${DIM}\$ ${CYN}$*${R}"; }   # show a manual command
+div()   { echo ""; echo "  ${B}$*${R}"; printf "  "; printf '─%.0s' {1..58}; echo ""; }
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+usage() {
+    sed -n '2,/^set -e/p' "$0" | grep '^#' | sed 's/^# \?//'
+    exit "${1:-0}"
+}
+
+# ask_yn "Question?" [y|n]  →  0=yes  1=no
+ask_yn() {
+    local msg="$1" default="${2:-y}"
+    local indicator; [[ "$default" == "y" ]] && indicator="${B}Y${R}/n" || indicator="y/${B}N${R}"
+    if [[ $YES -eq 1 ]]; then note "$msg → yes (--yes)"; return 0; fi
+    local ans
+    read -r -p "  ${CYN}?${R} ${msg} [${indicator}]: " ans
+    ans="${ans:-$default}"
+    [[ "${ans,,}" == "y" ]]
+}
+
+# ask_val "Label" "default" varname
+ask_val() {
+    local label="$1" default="$2" varname="$3"
+    if [[ $YES -eq 1 ]]; then
+        note "${label} → ${default} (--yes)"
+        printf -v "$varname" '%s' "$default"
+        return
+    fi
+    local ans
+    read -r -p "  ${CYN}?${R} ${label} [${DIM}${default}${R}]: " ans
+    printf -v "$varname" '%s' "${ans:-$default}"
+}
+
+# run_step cmd...  — disable set -e, run, capture rc, re-enable
+run_step() {
+    set +e
+    "$@"
+    _rc=$?
+    set -e
+}
+
+# ── Argument parsing ──────────────────────────────────────────────────────────
+
+PROJECT="" MODE="" BACKEND_URL="" CUSTOM_DIR="" DIST_PATH="" YES=0
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --mode)    MODE="$2";         shift 2 ;;
+        --backend) BACKEND_URL="$2";  shift 2 ;;
+        --dir)     CUSTOM_DIR="$2";   shift 2 ;;
+        --dist)    DIST_PATH="$2";    shift 2 ;;
+        --yes)     YES=1;             shift   ;;
+        -h|--help) usage 0 ;;
+        -*)        echo "Unknown option: $1"; usage 1 ;;
+        *)         PROJECT="$1"; shift ;;
+    esac
+done
+
+# ── Project detection ─────────────────────────────────────────────────────────
+
+[[ -z "$PROJECT" && "$PWD" == "${APACHE_ROOT}/"* ]] && \
+    PROJECT=$(echo "$PWD" | sed "s|^${APACHE_ROOT}/||" | cut -d'/' -f1)
+
+if [[ -z "$PROJECT" ]]; then
+    echo ""
+    # List Magento projects available
+    _found=()
+    for _d in "${APACHE_ROOT}"/*/; do
+        [[ -f "${_d}bin/magento" ]] && _found+=("$(basename "$_d")")
+    done
+    [[ ${#_found[@]} -gt 0 ]] && echo "  Available: ${_found[*]}" && echo ""
+    read -r -p "  ${CYN}?${R} Project name: " PROJECT
+    [[ -z "$PROJECT" ]] && { echo "Error: project name required"; exit 1; }
+fi
+
+MAGENTO_ROOT="${APACHE_ROOT}/${PROJECT}"
+[[ -d "$MAGENTO_ROOT" ]] || { echo "Error: not found: $MAGENTO_ROOT"; exit 1; }
+
+detect_php "$MAGENTO_ROOT"
+
+# ── Install-source detection (.m2install.conf → filesystem fallback) ──────────
+INSTALL_SOURCE=""
+if [[ -f "${MAGENTO_ROOT}/.m2install.conf" ]]; then
+    INSTALL_SOURCE=$(grep "^SOURCE=" "${MAGENTO_ROOT}/.m2install.conf" | cut -d= -f2 || true)
+fi
+if [[ -z "$INSTALL_SOURCE" ]]; then
+    [[ -d "${MAGENTO_ROOT}/.git" ]]         && INSTALL_SOURCE="git"
+    [[ -f "${MAGENTO_ROOT}/composer.lock" ]] && INSTALL_SOURCE="composer"
+fi
+
+# ── State detection ───────────────────────────────────────────────────────────
+
+META_FILE="${MAGENTO_ROOT}/.pwa"
+PWA_DIR="" dev_port=""
+has_meta=0 has_node_mods=0 has_dist=0
+dev_running=0 dev_pid="" upward_set=0 connector_ok=0
+
+if [[ -f "$META_FILE" ]]; then
+    has_meta=1
+    PWA_DIR=$(grep "^PWA_DIR=" "$META_FILE" | cut -d= -f2-)
+    dev_port=$(grep "^PWA_PORT=" "$META_FILE" 2>/dev/null | cut -d= -f2- || true)
+fi
+[[ -n "$PWA_DIR" && -d "$PWA_DIR/node_modules" ]] && has_node_mods=1 || true
+[[ -n "$PWA_DIR" && -f "$PWA_DIR/dist/upward.yml" ]] && has_dist=1 || true
+
+PID_FILE="/var/run/pwa/${PROJECT}.pid"
+if [[ -f "$PID_FILE" ]]; then
+    _pid=$(cat "$PID_FILE")
+    kill -0 "$_pid" 2>/dev/null && { dev_running=1; dev_pid="$_pid"; } || true
+fi
+
+grep -q "^SetEnv MAGENTO_BACKEND_URL " "${MAGENTO_ROOT}/.htaccess" 2>/dev/null \
+    && upward_set=1 || true
+
+{ [[ -d "${MAGENTO_ROOT}/vendor/magento/upward" ]] ||
+  [[ -d "${MAGENTO_ROOT}/vendor/magento/upward-php" ]]; } &&
+{ [[ -d "${MAGENTO_ROOT}/vendor/magento/module-upward-connector" ]] ||
+  [[ -d "${MAGENTO_ROOT}/app/code/Magento/UpwardConnector" ]]; } \
+    && connector_ok=1 || true
+
+# Defaults for prompts
+default_pwa_dir="${MAGENTO_ROOT}/pwa"
+[[ -n "$CUSTOM_DIR" ]] && default_pwa_dir="$CUSTOM_DIR"
+[[ -n "$PWA_DIR"    ]] && default_pwa_dir="$PWA_DIR"
+
+default_backend="https://${PROJECT}.${PHP_SEGMENT}.127.0.0.1.nip.io/pub/"
+[[ ! -f "${MAGENTO_ROOT}/pub/index.php" ]] && \
+    default_backend="https://${PROJECT}.${PHP_SEGMENT}.127.0.0.1.nip.io/"
+[[ -n "$BACKEND_URL" ]] && default_backend="$BACKEND_URL"
+
+# ── Banner + state display ────────────────────────────────────────────────────
+
+echo ""
+printf "  ${B}"; printf '═%.0s' {1..62}; printf "${R}\n"
+echo "  ${B}  pwa-wizard — ${PROJECT}${R}"
+printf "  ${B}"; printf '═%.0s' {1..62}; printf "${R}\n"
+echo ""
+echo "  Project  : ${B}${PROJECT}${R}   PHP: ${PHP_VERSION} [${PHP_DETECTED_FROM}]"
+[[ -n "$PWA_DIR" ]] && echo "  PWA dir  : ${PWA_DIR}"
+
+div "State"
+
+if [[ $has_node_mods -eq 1 ]]; then
+    ok "PWA installed"
+elif [[ $has_meta -eq 1 ]]; then
+    warn "PWA registered but node_modules missing"
+else
+    fail "No PWA project configured"
+fi
+
+if   [[ $has_dist -eq 1 ]];     then ok   "PWA built (dist/upward.yml)"
+elif [[ $has_node_mods -eq 1 ]]; then note "Not built yet"
+fi
+
+if [[ $dev_running -eq 1 ]]; then
+    ok   "Dev server  running  pid=${dev_pid}  port=${dev_port}"
+    note "  ${CYN}https://pwa-${PROJECT}.${PHP_SEGMENT}.127.0.0.1.nip.io/${R}"
+else
+    note "Dev server  stopped"
+fi
+
+if [[ $upward_set -eq 1 ]]; then
+    ok   "UPWARD-PHP  configured"
+    note "  ${CYN}https://${PROJECT}.${PHP_SEGMENT}.127.0.0.1.nip.io/${R}"
+else
+    note "UPWARD-PHP  not configured"
+fi
+
+if [[ $connector_ok -eq 1 ]]; then
+    ok   "UPWARD connector present"
+else
+    warn "UPWARD connector not found  (UPWARD-PHP mode unavailable)"
+fi
+
+# ── Branch: already installed ─────────────────────────────────────────────────
+
+if [[ $has_node_mods -eq 1 ]]; then
+
+    # Non-interactive path: --yes + --mode takes direct action
+    if [[ $YES -eq 1 && -n "$MODE" ]]; then
+        case "$MODE" in
+            dev)
+                if [[ $dev_running -eq 0 ]]; then
+                    hint "pwa-start ${PROJECT}"
+                    pwa-start "$PROJECT"
+                else
+                    note "Dev server already running — nothing to do"
+                fi
+                ;;
+            upward)
+                if [[ $connector_ok -eq 0 ]]; then
+                    fail "Connector not found — cannot build"
+                else
+                    hint "pwa-build ${PROJECT}"
+                    pwa-build "$PROJECT"
+                fi
+                ;;
+            both)
+                [[ $dev_running -eq 0 ]] && pwa-start "$PROJECT" || note "Dev server already running"
+                [[ $connector_ok -eq 1 ]] && pwa-build "$PROJECT" || warn "Connector not found — skipping UPWARD-PHP"
+                ;;
+        esac
+        exit 0
+    fi
+
+    if [[ $YES -eq 1 ]]; then
+        note "Project already configured. Pass --mode dev|upward|both with --yes to act."
+        exit 0
+    fi
+
+    # Interactive maintenance menu — fixed positions so muscle memory works
+    div "What would you like to do?"
+    echo ""
+
+    # Item 1: dev server action — label reflects current state
+    if [[ $dev_running -eq 1 ]]; then
+        _item1="${B}1)${R} Restart dev server  ${DIM}(running, pid ${dev_pid})${R}"
+    else
+        _item1="${B}1)${R} Start dev server"
+    fi
+
+    # Item 2: build — always shown; dim + note when connector is absent
+    if [[ $connector_ok -eq 1 ]]; then
+        if [[ $has_dist -eq 1 ]]; then
+            _item2="${B}2)${R} Rebuild UPWARD-PHP"
+        else
+            _item2="${B}2)${R} Build UPWARD-PHP"
+        fi
+    else
+        _item2="${DIM}2)${R}${DIM} Build UPWARD-PHP  (connector not found — unavailable)${R}"
+    fi
+
+    echo "    ${_item1}"
+    echo "    ${_item2}"
+    echo "    ${B}3)${R} Reinstall  ${DIM}(pwa-install --reset)${R}"
+    echo "    ${B}0)${R} Exit"
+    echo ""
+
+    read -r -p "  ${CYN}?${R} Choice [0]: " _c
+    _c="${_c:-0}"
+
+    case "$_c" in
+        1)
+            echo ""
+            if [[ $dev_running -eq 1 ]]; then
+                hint "pwa-stop ${PROJECT} && pwa-start ${PROJECT}"
+                ask_yn "Restart?" && { pwa-stop "$PROJECT"; pwa-start "$PROJECT"; }
+            else
+                hint "pwa-start ${PROJECT}"
+                ask_yn "Start now?" && pwa-start "$PROJECT"
+            fi
+            ;;
+        2)
+            if [[ $connector_ok -eq 0 ]]; then
+                fail "UPWARD connector not found — cannot build"
+            else
+                echo ""
+                hint "pwa-build ${PROJECT}"
+                ask_yn "Build?" && pwa-build "$PROJECT"
+            fi
+            ;;
+        3)
+            ask_val "PWA directory" "$default_pwa_dir" _dir
+            ask_val "Backend URL"   "$default_backend"  _url
+            echo ""
+            hint "pwa-install ${PROJECT} --dir ${_dir} --backend ${_url} --reset"
+            ask_yn "Reinstall?" && \
+                pwa-install "$PROJECT" --dir "$_dir" --backend "$_url" --reset
+            ;;
+        0)
+            echo "  Exiting."; exit 0
+            ;;
+        *)
+            echo "  Invalid choice."; exit 1
+            ;;
+    esac
+    exit 0
+fi
+
+# ── First-time setup ──────────────────────────────────────────────────────────
+
+# Mode selection
+if [[ -z "$MODE" ]]; then
+    div "Setup mode"
+    echo ""
+    echo "    1) Dev server    Node.js, live reload"
+    echo "       ${DIM}URL: https://pwa-${PROJECT}.${PHP_SEGMENT}.127.0.0.1.nip.io/${R}"
+    echo ""
+    if [[ $connector_ok -eq 1 ]]; then
+        echo "    2) UPWARD-PHP    Served through Magento, no Node needed"
+        echo "       ${DIM}URL: https://${PROJECT}.${PHP_SEGMENT}.127.0.0.1.nip.io/${R}"
+        echo ""
+        echo "    3) Both          Install once, choose at runtime"
+        echo ""
+        read -r -p "  ${CYN}?${R} Mode [1]: " _m
+        case "${_m:-1}" in
+            2) MODE=upward ;; 3) MODE=both ;; *) MODE=dev ;;
+        esac
+    else
+        echo "    ${DIM}(Options 2+3 require UPWARD connector — not found in this project)${R}"
+        echo ""
+        MODE=dev
+        echo "  Using: dev"
+    fi
+fi
+
+# ── Step: pwa-install ─────────────────────────────────────────────────────────
+
+div "Install PWA project"
+
+if [[ $has_node_mods -eq 0 ]]; then
+    ask_val "PWA directory" "$default_pwa_dir" _dir
+    ask_val "Backend URL"   "$default_backend"  _url
+
+    _icmd="pwa-install ${PROJECT} --dir ${_dir} --backend ${_url}"
+    [[ -n "$DIST_PATH" ]] && _icmd="${_icmd} --dist ${DIST_PATH}" || true
+    [[ $has_meta -eq 1  ]] && _icmd="${_icmd} --reset"          || true
+
+    echo ""
+    hint "$_icmd"
+    echo ""
+
+    if ask_yn "Run pwa-install?"; then
+        run_step pwa-install "$PROJECT" \
+            --dir "$_dir" --backend "$_url" \
+            ${DIST_PATH:+--dist "$DIST_PATH"} \
+            $([[ $has_meta -eq 1 ]] && echo --reset)
+        # Re-read PWA_DIR from the meta file (written by pwa-install)
+        PWA_DIR=$(grep "^PWA_DIR=" "$META_FILE" 2>/dev/null | cut -d= -f2- || true)
+        # Trust disk over exit code: yarn create may exit non-zero even after a
+        # successful install (e.g. when prompts were auto-answered via pipe).
+        if [[ -d "${PWA_DIR}/node_modules" ]]; then
+            has_node_mods=1
+            [[ $_rc -ne 0 ]] && warn "pwa-install exited non-zero but node_modules found — continuing" || true
+        elif [[ $_rc -ne 0 ]]; then
+            warn "pwa-install exited non-zero — see output above"
+        fi
+    else
+        note "Skipped. Run the command above manually, then re-run pwa-wizard."
+        exit 0
+    fi
+else
+    ok "Already installed — skipping"
+    note "To reinstall: pwa-install ${PROJECT} --reset"
+fi
+
+# ── Step: pwa-start (dev / both) ─────────────────────────────────────────────
+
+if [[ "$MODE" == "dev" || "$MODE" == "both" ]]; then
+    div "Start dev server"
+
+    if [[ $dev_running -eq 1 ]]; then
+        ok "Already running (pid ${dev_pid}) — skipping"
+    elif [[ $has_node_mods -eq 1 ]]; then
+        echo ""
+        hint "pwa-start ${PROJECT}"
+        echo ""
+        if ask_yn "Start dev server?"; then
+            run_step pwa-start "$PROJECT"
+            [[ $_rc -eq 0 ]] && dev_running=1 || warn "pwa-start exited non-zero"
+        else
+            note "Skipped. Start manually: pwa-start ${PROJECT}"
+        fi
+    else
+        warn "node_modules missing — skipping"
+    fi
+fi
+
+# ── Step: pwa-build (upward / both) ──────────────────────────────────────────
+
+if [[ "$MODE" == "upward" || "$MODE" == "both" ]]; then
+    div "Build for UPWARD-PHP"
+
+    if [[ $connector_ok -eq 0 ]]; then
+        fail "UPWARD connector not installed"
+        echo ""
+        echo "  Install it first, then re-run: pwa-wizard ${PROJECT} --mode upward"
+        echo ""
+        if [[ "$INSTALL_SOURCE" == "git" ]]; then
+            echo "  Git install — clone and link into app/code:"
+            hint "git clone git@github.com:magento-commerce/magento2-upward-connector.git .pwa-deps/magento2-upward-connector"
+            hint "mkdir -p app/code/Magento"
+            hint "php dev/tools/build-ee.php --command=link --ee-source=.pwa-deps/magento2-upward-connector --ce-source=app/code/Magento"
+        else
+            hint "composer require magento/module-upward-connector"
+        fi
+    elif [[ $has_node_mods -eq 0 ]]; then
+        warn "node_modules not present — install first"
+    elif [[ $upward_set -eq 1 && $has_dist -eq 1 ]]; then
+        ok "Already configured — skipping"
+        note "To rebuild: pwa-build ${PROJECT}"
+    else
+        echo ""
+        hint "pwa-build ${PROJECT}"
+        echo ""
+        if ask_yn "Run pwa-build?"; then
+            run_step pwa-build "$PROJECT"
+            [[ $_rc -eq 0 ]] && upward_set=1 || warn "pwa-build exited non-zero"
+        else
+            note "Skipped. Run manually: pwa-build ${PROJECT}"
+        fi
+    fi
+fi
+
+# ── Summary ───────────────────────────────────────────────────────────────────
+
+echo ""
+printf "  ${B}"; printf '═%.0s' {1..62}; printf "${R}\n"
+echo "  ${B}  Done${R}"
+printf "  ${B}"; printf '═%.0s' {1..62}; printf "${R}\n"
+echo ""
+
+[[ $dev_running -eq 1 ]] && \
+    ok "Dev server : ${CYN}https://pwa-${PROJECT}.${PHP_SEGMENT}.127.0.0.1.nip.io/${R}" || true
+[[ $upward_set  -eq 1 ]] && \
+    ok "UPWARD-PHP : ${CYN}https://${PROJECT}.${PHP_SEGMENT}.127.0.0.1.nip.io/${R}" || true
+
+echo ""
+echo "  ${DIM}pwa-status ${PROJECT}     — check state"
+echo "  pwa-logs ${PROJECT} -f    — follow dev server log"
+echo "  pwa-stop ${PROJECT}       — stop dev server"
+echo "  pwa-build ${PROJECT}      — rebuild UPWARD-PHP${R}"
+echo ""

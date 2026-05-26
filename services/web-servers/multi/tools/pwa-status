@@ -1,0 +1,124 @@
+#!/bin/bash
+# pwa-status — show status of all PWA Studio projects
+#
+# USAGE
+#   pwa-status [project]
+#
+# DESCRIPTION
+#   For each project with a .pwa meta file, shows:
+#     - PWA directory and PHP version
+#     - Install state: node_modules and dist/upward.yml present?
+#     - Dev server state (running / stopped) with URL if running
+#     - UPWARD-PHP state (configured / not)
+#     - UPWARD connector present?
+#
+#   Project name is auto-detected when run from inside the project directory.
+#   When run from the apache root (or outside any project), shows all projects.
+#
+# EXAMPLES
+#   pwa-status          # all projects
+#   pwa-status 24dev    # one project
+
+set -e
+
+source /usr/local/bin/m2d-lib.sh
+
+APACHE_ROOT="${M2D_APACHE_ROOT_DIRECTORY:-/var/www/html}"
+
+usage() {
+    sed -n '2,/^set -e/p' "$0" | grep '^#' | sed 's/^# \?//'
+    exit "${1:-0}"
+}
+
+PROJECT=""
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help) usage 0 ;;
+        -*)        echo "Unknown option: $1"; usage 1 ;;
+        *)         PROJECT="$1"; shift ;;
+    esac
+done
+
+# Auto-detect from cwd only when inside a specific project directory
+if [[ -z "$PROJECT" && "$PWD" == "${APACHE_ROOT}/"* ]]; then
+    _candidate=$(echo "$PWD" | sed "s|^${APACHE_ROOT}/||" | cut -d'/' -f1)
+    # Only auto-select if it has a .pwa file (i.e. is a real pwa project)
+    [[ -f "${APACHE_ROOT}/${_candidate}/.pwa" ]] && PROJECT="$_candidate" || true
+fi
+
+# ── Per-project status ────────────────────────────────────────────────────────
+
+show_status() {
+    local project="$1"
+    local meta="${APACHE_ROOT}/${project}/.pwa"
+
+    if [[ ! -f "$meta" ]]; then
+        echo "[pwa-status] $project: no .pwa file (run pwa-install first)"
+        return
+    fi
+
+    local pwa_dir port pid_file
+    pwa_dir=$(grep "^PWA_DIR=" "$meta" | cut -d= -f2-)
+    port=$(grep "^PWA_PORT=" "$meta" 2>/dev/null | cut -d= -f2- || true)
+    pid_file="/var/run/pwa/${project}.pid"
+
+    detect_php "${APACHE_ROOT}/${project}"
+
+    # ── Install / build state ─────────────────────────────────────────────────
+    local node_state build_state
+    [[ -d "${pwa_dir}/node_modules"   ]] && node_state="node_modules ✓" || node_state="node_modules ✗"
+    [[ -f "${pwa_dir}/dist/upward.yml" ]] && build_state="dist ✓"       || build_state="dist ✗"
+
+    # ── Dev server ────────────────────────────────────────────────────────────
+    local dev_line
+    if [[ -f "$pid_file" ]]; then
+        local pid; pid=$(cat "$pid_file")
+        if kill -0 "$pid" 2>/dev/null; then
+            dev_line="running   pid=${pid}  port=${port:-?}  https://pwa-${project}.${PHP_SEGMENT}.127.0.0.1.nip.io/"
+        else
+            rm -f "$pid_file"
+            dev_line="stopped   (stale pid removed)"
+        fi
+    else
+        dev_line="stopped"
+    fi
+
+    # ── UPWARD-PHP ────────────────────────────────────────────────────────────
+    local upward_line="not configured"
+    if grep -q "^SetEnv MAGENTO_BACKEND_URL " "${APACHE_ROOT}/${project}/.htaccess" 2>/dev/null; then
+        upward_line="configured  https://${project}.${PHP_SEGMENT}.127.0.0.1.nip.io/"
+    fi
+
+    # ── UPWARD connector ──────────────────────────────────────────────────────
+    local connector_line="not found"
+    if { [[ -d "${APACHE_ROOT}/${project}/vendor/magento/upward" ]] ||
+         [[ -d "${APACHE_ROOT}/${project}/vendor/magento/upward-php" ]]; } &&
+       { [[ -d "${APACHE_ROOT}/${project}/vendor/magento/module-upward-connector" ]] ||
+         [[ -d "${APACHE_ROOT}/${project}/app/code/Magento/UpwardConnector" ]]; }; then
+        connector_line="present"
+    fi
+
+    echo "[pwa-status] ${project}"
+    echo "  dir       : ${pwa_dir}"
+    echo "  php       : ${PHP_VERSION} [${PHP_DETECTED_FROM}]"
+    echo "  install   : ${node_state}   ${build_state}"
+    echo "  dev       : ${dev_line}"
+    echo "  upward    : ${upward_line}"
+    echo "  connector : ${connector_line}"
+}
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+if [[ -n "$PROJECT" ]]; then
+    show_status "$PROJECT"
+else
+    found=0
+    for meta in "${APACHE_ROOT}"/*/.pwa; do
+        [[ -f "$meta" ]] || continue
+        project=$(basename "$(dirname "$meta")")
+        show_status "$project"
+        found=$((found + 1))
+    done
+    [[ $found -eq 0 ]] && echo "[pwa-status] no PWA projects configured" || true
+fi
