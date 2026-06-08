@@ -17,13 +17,6 @@ touch /usr/local/etc/pwa-ports.map
 chown magento:magento /usr/local/etc/pwa-ports.map /var/log/pwa /var/run/pwa 2>/dev/null || true
 chmod 664 /usr/local/etc/pwa-ports.map 2>/dev/null || true
 
-# Re-start any PWA dev servers that were running before container restart
-for pidfile in /var/run/pwa/*.pid; do
-    [ -f "$pidfile" ] || continue
-    project=$(basename "$pidfile" .pid)
-    pwa-start "$project" 2>/dev/null || true
-done
-
 # Start a PHP-FPM pool for every installed version
 mkdir -p /run/php
 for ver in 8.1 8.2 8.3 8.4 8.5; do
@@ -38,6 +31,14 @@ done
 
 service ssh start
 service cron start
+
+# Re-start any PWA dev servers that were running before container restart.
+# Must run after PHP-FPM is up so pwa-start can reach the Magento backend.
+for pidfile in /var/run/pwa/*.pid; do
+    [ -f "$pidfile" ] || continue
+    project=$(basename "$pidfile" .pid)
+    pwa-start "$project" 2>/dev/null || true
+done
 
 echo "[start.sh] default PHP: ${DEFAULT_PHP}"
 exec apache2ctl -D FOREGROUND

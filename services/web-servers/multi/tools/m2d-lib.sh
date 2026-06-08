@@ -6,19 +6,17 @@
 # Resolves the PHP binary for a Magento project directory.
 #
 # Detection order:
-#   1. meta.json `php` key          — full path, written by m2install
-#   2. meta.json `php_version` key  — "php8.3" format, written by prepend.php
-#   3. phpXX.code.tgz in project root
-#   4. M2D_WEB_SERVER_PHP_VERSION env var
-#   5. system `php` in PATH
+#   1. .m2install.conf `M2D_PHP_BIN` key — full path, written by m2install on success
+#   2. phpXX.code.tgz in project root
+#   3. M2D_WEB_SERVER_PHP_VERSION env var
+#   4. system `php` in PATH
 #
 # Sets in calling scope:
 #   PHP_BIN           full path to php binary       e.g. /usr/local/bin/php83
 #   PHP_SEGMENT       URL-safe version segment       e.g. php83
 #   PHP_VERSION       dotted version string          e.g. 8.3
 #   PHP_DETECTED_FROM source label:
-#                       meta_php | meta_php_version | code_tgz |
-#                       env_default | system_default
+#                       m2install_conf | code_tgz | env_default | system_default
 
 detect_php() {
     local project_root="${1:-$(pwd)}"
@@ -27,35 +25,17 @@ detect_php() {
     PHP_VERSION=""
     PHP_DETECTED_FROM=""
 
-    # 1 + 2. meta.json — try `php` key (full path) then `php_version` key ("php8.3")
-    if [[ -f "${project_root}/meta.json" ]]; then
-        local _result _src _bin
-        _result=$(python3 - "${project_root}/meta.json" 2>/dev/null <<'PYEOF'
-import json, re, sys
-try:
-    d = json.load(open(sys.argv[1]))
-    v = d.get('php', '')
-    if v and v.startswith('/'):
-        print('meta_php\t' + v)
-    else:
-        v2 = d.get('php_version', '')
-        m = re.match(r'php(\d+)\.(\d+)', v2)
-        if m:
-            print('meta_php_version\t/usr/local/bin/php' + m.group(1) + m.group(2))
-except Exception:
-    pass
-PYEOF
-        )
-        if [[ -n "$_result" ]]; then
-            IFS=$'\t' read -r _src _bin <<< "$_result"
-            if [[ -x "$_bin" ]]; then
-                PHP_BIN="$_bin"
-                PHP_DETECTED_FROM="$_src"
-            fi
+    # 1. .m2install.conf — M2D_PHP_BIN key (written by m2install on successful install)
+    if [[ -f "${project_root}/.m2install.conf" ]]; then
+        local _bin
+        _bin=$(grep -m1 '^M2D_PHP_BIN=' "${project_root}/.m2install.conf" | cut -d= -f2-)
+        if [[ -n "$_bin" && -x "$_bin" ]]; then
+            PHP_BIN="$_bin"
+            PHP_DETECTED_FROM="m2install_conf"
         fi
     fi
 
-    # 3. phpXX.code.tgz in project root
+    # 2. phpXX.code.tgz in project root
     if [[ -z "$PHP_BIN" ]]; then
         local _tgz _ver _candidate
         _tgz=$(find "$project_root" -maxdepth 1 -name 'php[0-9][0-9].code.tgz' 2>/dev/null | head -1)
@@ -69,7 +49,7 @@ PYEOF
         fi
     fi
 
-    # 4. M2D_WEB_SERVER_PHP_VERSION environment variable
+    # 3. M2D_WEB_SERVER_PHP_VERSION environment variable
     if [[ -z "$PHP_BIN" && -n "${M2D_WEB_SERVER_PHP_VERSION:-}" ]]; then
         local _candidate="/usr/local/bin/php$(echo "$M2D_WEB_SERVER_PHP_VERSION" | tr -d '.')"
         if [[ -x "$_candidate" ]]; then
@@ -78,7 +58,7 @@ PYEOF
         fi
     fi
 
-    # 5. System default
+    # 4. System default
     if [[ -z "$PHP_BIN" ]]; then
         PHP_BIN=$(command -v php 2>/dev/null || echo "/usr/bin/php")
         PHP_DETECTED_FROM="system_default"
@@ -110,4 +90,34 @@ run_as_magento() {
     else
         "$@"
     fi
+}
+
+# ── PWA multi-store helpers ────────────────────────────────────────────────────
+
+# pwa_meta_file APACHE_ROOT PROJECT [STORE_CODE]
+# Returns path to .pwa (default store) or .pwa.<store> (named store).
+pwa_meta_file() {
+    local root="$1" project="$2" store="${3:-}"
+    [[ -n "$store" ]] && echo "${root}/${project}/.pwa.${store}" || echo "${root}/${project}/.pwa"
+}
+
+# pwa_run_key PROJECT [STORE_CODE]
+# Key used for Apache RewriteMap, PID file, log file.
+# Default store: "<project>"   Named store: "<project>-<store>"
+pwa_run_key() {
+    local project="$1" store="${2:-}"
+    [[ -n "$store" ]] && echo "${project}-${store}" || echo "${project}"
+}
+
+# pwa_default_dir APACHE_ROOT PROJECT [STORE_CODE]
+# Default PWA directory.  Default: "<project>/pwa"  Named: "<project>/pwa-<store>"
+pwa_default_dir() {
+    local root="$1" project="$2" store="${3:-}"
+    [[ -n "$store" ]] && echo "${root}/${project}/pwa-${store}" || echo "${root}/${project}/pwa"
+}
+
+# pwa_dev_url RUN_KEY PHP_SEGMENT
+# Returns https://pwa-<run_key>.<phpver>.127.0.0.1.nip.io/
+pwa_dev_url() {
+    echo "https://pwa-${1}.${2}.127.0.0.1.nip.io/"
 }

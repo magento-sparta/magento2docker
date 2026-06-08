@@ -20,18 +20,25 @@ if (empty($segments[0])) {
 }
 
 $docRoot        = rtrim($apacheRoot, '/') . '/' . $segments[0];
-$projectPrepend = $docRoot . '/prepend.php';
+$projectPrepend = $docRoot . '/.prepend.php';
 
 // ── Copy to project root; load project copy in place of global ────────────────
-// Running as global (/usr/local/lib/php/prepend.php): copy self once, then
+// Running as global (/usr/local/lib/php/.prepend.php): copy self once, then
 // delegate entirely — the project copy takes over for this request.
 // Running as project copy: realpath matches, block is skipped, execution
-// continues below to meta.json.
+// continues to the New Relic section below.
 
 if (realpath($projectPrepend) !== realpath(__FILE__)) {
     if (!file_exists($projectPrepend)) {
+        // Only seed the project copy once m2install has completed successfully.
+        // m2install writes M2D_PHP_BIN to .m2install.conf as a completion marker.
+        $confFile = $docRoot . '/.m2install.conf';
+        $conf = file_exists($confFile) ? file_get_contents($confFile) : '';
+        if (strpos($conf, 'M2D_PHP_BIN=') === false) {
+            return;
+        }
         @copy(__FILE__, $projectPrepend);
-        @copy(__FILE__, $docRoot . '/prepend.dist.php');
+        @copy(__FILE__, $docRoot . '/.prepend.dist.php');
     }
     if (file_exists($projectPrepend)) {
         require $projectPrepend;
@@ -44,7 +51,7 @@ unset($projectPrepend);
 ini_set('newrelic.browser_monitoring.auto_instrument', '1');
 
 // ── New Relic mock configuration ──────────────────────────────────────────────
-// This block is only reached by the project-root copy of prepend.php, never
+// This block is only reached by the project-root copy of .prepend.php, never
 // by the global original — so overrides apply exactly once per request.
 //
 // Use newrelic_mock_set(string $function, callable $handler) to override any
@@ -73,29 +80,3 @@ ini_set('newrelic.browser_monitoring.auto_instrument', '1');
 //         return true;
 //     }
 // );
-
-// ── meta.json creation from phpXX.code.tgz ───────────────────────────────────
-
-$metaFile = $docRoot . '/meta.json';
-if (file_exists($metaFile)) {
-    return;
-}
-
-$tgzFiles = glob($docRoot . '/php[0-9][0-9].code.tgz') ?: [];
-if (empty($tgzFiles)) {
-    return;
-}
-
-$filename = basename($tgzFiles[0]);
-if (!preg_match('/^php(\d)(\d)\.code\.tgz$/', $filename, $m)) {
-    return;
-}
-
-file_put_contents($metaFile,
-    json_encode([
-        'php_version'   => 'php' . $m[1] . '.' . $m[2],
-        'sql_version'   => '',
-        'search_engine' => '',
-        'cache_engine'  => '',
-    ])
-);

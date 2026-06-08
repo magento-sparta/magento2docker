@@ -7,6 +7,8 @@ FROM mariadb:10.2 AS m2d_db_engine_mariadb_10.2
 FROM mariadb:10.3 AS m2d_db_engine_mariadb_10.3
 FROM mariadb:10.4 AS m2d_db_engine_mariadb_10.4
 FROM mariadb:10.6 AS m2d_db_engine_mariadb_10.6
+FROM mariadb:10.11 AS m2d_db_engine_mariadb_10.11
+FROM mariadb:11.4 AS m2d_db_engine_mariadb_11.4
 
 FROM --platform=linux/amd64 mysql:5.7 AS m2d_db_engine_mysql_5
 FROM --platform=linux/amd64 mysql:8.0.28 AS m2d_db_engine_mysql_8

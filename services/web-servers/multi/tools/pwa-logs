@@ -5,15 +5,19 @@
 #   pwa-logs [project] [options]
 #
 # OPTIONS
-#   -f       Follow (like tail -f)
-#   -n N     Lines to show (default: 50)
+#   --store CODE   Show log for a specific store (multi-store setups).
+#   -f             Follow (like tail -f)
+#   -n N           Lines to show (default: 50)
 
 set -e
+
+source /usr/local/bin/m2d-lib.sh
 
 APACHE_ROOT="${M2D_APACHE_ROOT_DIRECTORY:-/var/www/html}"
 FOLLOW=0
 LINES=50
 PROJECT=""
+STORE_CODE=""
 
 usage() {
     sed -n '2,/^set -e/p' "$0" | grep '^#' | sed 's/^# \?//'
@@ -22,6 +26,7 @@ usage() {
 
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --store)   STORE_CODE="$2"; shift 2 ;;
         -f)        FOLLOW=1;        shift   ;;
         -n)        LINES="$2";      shift 2 ;;
         -h|--help) usage 0 ;;
@@ -39,12 +44,13 @@ if [[ -z "$PROJECT" ]]; then
     fi
 fi
 
-LOG_FILE="/var/log/pwa/${PROJECT}.log"
+RUN_KEY=$(pwa_run_key "$PROJECT" "$STORE_CODE")
+LOG_FILE="/var/log/pwa/${RUN_KEY}.log"
 
 if [[ ! -f "$LOG_FILE" ]]; then
     echo "[pwa-logs] No log file: ${LOG_FILE}"
-    echo "  The dev server has not been started for this project."
-    echo "  Run: pwa-start ${PROJECT}"
+    echo "  The dev server has not been started for this project/store."
+    echo "  Run: pwa-start ${PROJECT}${STORE_CODE:+ --store ${STORE_CODE}}"
     exit 1
 fi
 

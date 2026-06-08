@@ -1,15 +1,21 @@
 #!/usr/bin/env bash
 # Switch the active PHP CLI version and persist M2D_WEB_SERVER_PHP_VERSION.
-# Usage: switch-php 83 | switch-php 8.3
+# Usage: switch-php 83 | switch-php 8.3 | switch-php php83 | switch-php php8.3
 
-version="$1"
+# Use return when sourced so we don't kill the caller's shell on error.
+_switch_php_exit() { [[ "${BASH_SOURCE[0]}" != "$0" ]] && return "$1" || exit "$1"; }
+
+version="${1:-}"
 
 if [[ -z "$version" ]]; then
-    echo "Usage: switchphp VERSION  (e.g. switchphp 83 or switchphp 8.3)"
-    exit 1
+    echo "Usage: switch-php VERSION  (e.g. switch-php 83, 8.3, php83, php8.3)"
+    _switch_php_exit 1
 fi
 
-# normalise: '83' → '8.3', '8.3' stays '8.3'
+# strip optional leading "php": "php83" → "83", "php8.3" → "8.3"
+version="${version#php}"
+
+# normalise: '83' → '8.3'
 if [[ "$version" =~ ^([0-9])([0-9])$ ]]; then
     version="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
 fi
@@ -17,7 +23,7 @@ fi
 allowed=(8.1 8.2 8.3 8.4 8.5)
 if [[ ! " ${allowed[*]} " =~ " ${version} " ]]; then
     echo "Error: PHP ${version} is not supported. Allowed versions: ${allowed[*]}"
-    exit 1
+    _switch_php_exit 1
 fi
 
 sudo update-alternatives --set php "/usr/bin/php${version}" 2>/dev/null || true

@@ -2,13 +2,22 @@
 # pwa-stop — stop the PWA Studio dev server for a project
 #
 # USAGE
-#   pwa-stop [project]
+#   pwa-stop [project] [--store CODE]
 #   pwa-stop --all
 #
 # OPTIONS
-#   --all   Stop every running PWA dev server
+#   --store CODE  Stop the dev server for a specific store view (multi-store).
+#                 Omit to stop the default store.
+#   --all         Stop every running PWA dev server (all projects and stores).
+#
+# DESCRIPTION
+#   Sends SIGTERM to the entire process group (yarn → webpack chain), then
+#   frees the port and removes the PID file.
+#   Project name is auto-detected when run from inside the project directory.
 
 set -e
+
+source /usr/local/bin/m2d-lib.sh
 
 APACHE_ROOT="${M2D_APACHE_ROOT_DIRECTORY:-/var/www/html}"
 PWA_PORTS_MAP="/usr/local/etc/pwa-ports.map"
@@ -18,24 +27,25 @@ usage() {
     exit "${1:-0}"
 }
 
+# stop_project RUN_KEY
+# Stops the dev server identified by RUN_KEY (project or project-store).
 stop_project() {
-    local project="$1"
-    local pid_file="/var/run/pwa/${project}.pid"
+    local run_key="$1"
+    local pid_file="/var/run/pwa/${run_key}.pid"
 
-    # Grab registered port so we can nuke any orphaned processes bound to it.
-    local meta="${APACHE_ROOT}/${project}/.pwa"
+    # Get the registered port from the RewriteMap for belt-and-suspenders cleanup.
     local port=""
-    [[ -f "$meta" ]] && port=$(grep "^PWA_PORT=" "$meta" 2>/dev/null | cut -d= -f2 || true)
+    [[ -f "$PWA_PORTS_MAP" ]] && \
+        port=$(grep "^${run_key} " "$PWA_PORTS_MAP" 2>/dev/null | awk '{print $2}' || true)
 
     _free_port() {
-        # Belt-and-suspenders: kill anything still listening on $port.
-        # Catches children that moved to a new process group (e.g. webpack).
+        # Kill anything still listening on $port (catches children in new process groups).
         [[ -n "$port" ]] && fuser -k "${port}/tcp" 2>/dev/null || true
     }
 
     if [[ ! -f "$pid_file" ]]; then
         _free_port
-        echo "[pwa-stop] $project: no pid file (not running)"
+        echo "[pwa-stop] ${run_key}: no pid file (not running)"
         return 0
     fi
 
@@ -45,49 +55,59 @@ stop_project() {
     if kill -0 "$pid" 2>/dev/null; then
         # 1. Try to kill the whole process group (works when setsid is the group leader).
         kill -TERM -"$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
-        # 2. Kill any surviving descendant still holding the port
-        #    (su may have promoted children to a new process group).
+        # 2. Kill any surviving descendant still holding the port.
         sleep 0.5
         _free_port
         rm -f "$pid_file"
-        # Remove from Apache RewriteMap so port is freed
-        sed -i "/^${project} /d" "$PWA_PORTS_MAP" 2>/dev/null || true
-        echo "[pwa-stop] $project: stopped (pid $pid)"
+        sed -i "/^${run_key} /d" "$PWA_PORTS_MAP" 2>/dev/null || true
+        echo "[pwa-stop] ${run_key}: stopped (pid $pid)"
     else
         rm -f "$pid_file"
         _free_port
-        sed -i "/^${project} /d" "$PWA_PORTS_MAP" 2>/dev/null || true
-        echo "[pwa-stop] $project: was not running (stale pid $pid removed)"
+        sed -i "/^${run_key} /d" "$PWA_PORTS_MAP" 2>/dev/null || true
+        echo "[pwa-stop] ${run_key}: was not running (stale pid $pid removed)"
     fi
 }
 
+# ── Argument parsing ──────────────────────────────────────────────────────────
+
+PROJECT=""
+STORE_CODE=""
+ALL=0
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --all)     ALL=1;             shift   ;;
+        --store)   STORE_CODE="$2";   shift 2 ;;
+        -h|--help) usage 0 ;;
+        -*)        echo "Unknown option: $1"; usage 1 ;;
+        *)         PROJECT="$1";      shift   ;;
+    esac
+done
+
 # Auto-detect project from cwd if no argument given
-if [[ $# -eq 0 ]]; then
+if [[ -z "$PROJECT" && $ALL -eq 0 ]]; then
     if [[ "$PWD" == "${APACHE_ROOT}/"* ]]; then
-        set -- "$(echo "$PWD" | sed "s|^${APACHE_ROOT}/||" | cut -d'/' -f1)"
+        PROJECT=$(echo "$PWD" | sed "s|^${APACHE_ROOT}/||" | cut -d'/' -f1)
     else
-        echo "Usage: pwa-stop <project> | pwa-stop --all"; exit 1
+        echo "Usage: pwa-stop <project> [--store CODE] | pwa-stop --all"
+        exit 1
     fi
 fi
 
-case "${1:-}" in
-    --all)
-        found=0
-        for pidfile in /var/run/pwa/*.pid; do
-            [[ -f "$pidfile" ]] || continue
-            project=$(basename "$pidfile" .pid)
-            stop_project "$project"
-            found=$((found + 1))
-        done
-        [[ $found -eq 0 ]] && echo "[pwa-stop] no running PWA dev servers found" || true
-        ;;
-    -h|--help)
-        usage 0
-        ;;
-    *)
-        stop_project "$1"
-        ;;
-esac
+if [[ $ALL -eq 1 ]]; then
+    found=0
+    for pidfile in /var/run/pwa/*.pid; do
+        [[ -f "$pidfile" ]] || continue
+        run_key=$(basename "$pidfile" .pid)
+        stop_project "$run_key"
+        found=$((found + 1))
+    done
+    [[ $found -eq 0 ]] && echo "[pwa-stop] no running PWA dev servers found" || true
+else
+    RUN_KEY=$(pwa_run_key "$PROJECT" "$STORE_CODE")
+    stop_project "$RUN_KEY"
+fi
 
 # Graceful reload so Apache picks up any map changes
 apache2ctl graceful 2>/dev/null || true

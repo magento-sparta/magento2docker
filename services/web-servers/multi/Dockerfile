@@ -2,6 +2,7 @@ ARG M2D_WEB_SERVER_PHP_VERSION='8.2'
 ARG M2D_ENABLE_BLACKFIRE='no'
 ARG M2D_ENABLE_MAILCATCHER='no'
 ARG M2D_APACHE_ROOT_DIRECTORY='/var/www/html'
+ARG PHP_VERSIONS='8.1 8.2 8.3 8.4 8.5'
 
 ## MINICA CERTIFICATE BUILDER ##
 FROM golang:1.22-bullseye AS minica_builder
@@ -15,13 +16,14 @@ ARG M2D_WEB_SERVER_PHP_VERSION
 ARG M2D_WEB_SERVER_PHP_MEMORY_LIMIT='2G'
 ARG M2D_XDEBUG_IDE_KEY='PHPSTORM'
 ARG M2D_APACHE_ROOT_DIRECTORY
+ARG PHP_VERSIONS
 ENV M2D_WEB_SERVER_PHP_VERSION=${M2D_WEB_SERVER_PHP_VERSION}
 ENV M2D_WEB_SERVER_PHP_MEMORY_LIMIT=${M2D_WEB_SERVER_PHP_MEMORY_LIMIT}
 ENV M2D_XDEBUG_IDE_KEY=${M2D_XDEBUG_IDE_KEY}
 ENV M2D_APACHE_ROOT_DIRECTORY=${M2D_APACHE_ROOT_DIRECTORY}
 
 # SETTING UP THE SYSTEM:
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
         apache2 \
         apt-transport-https \
         apt-utils \
@@ -48,11 +50,13 @@ RUN apt-get update && apt-get install -y \
         libzstd-dev \
         lsb-release \
         lsof \
+        make \
         mariadb-client \
         mc \
         nano \
         openssh-server \
         parallel \
+        patch \
         pip \
         pv \
         rsync \
@@ -77,23 +81,18 @@ RUN curl -sSL https://packages.sury.org/php/apt.gpg \
 # PHP EXTENSIONS FOR ALL VERSIONS:
 ARG PHP_EXTENSIONS="fpm cli bcmath curl gd intl mbstring mysql soap sockets xml xsl zip"
 ARG CACHEBUST_PHP_EXT=1
-RUN echo "ext-cache:${CACHEBUST_PHP_EXT}" && for ver in 8.1 8.2 8.3 8.4 8.5; do \
+RUN echo "ext-cache:${CACHEBUST_PHP_EXT}" && for ver in $PHP_VERSIONS; do \
         pkgs=""; \
         for ext in $PHP_EXTENSIONS; do pkgs="$pkgs php${ver}-${ext}"; done; \
-        apt-get install -y $pkgs || echo "WARN: some packages for PHP ${ver} unavailable"; \
+        apt-get install -y --no-install-recommends $pkgs || echo "WARN: some packages for PHP ${ver} unavailable"; \
         phpenmod -v ${ver} -s cli bcmath curl gd intl mbstring xml xsl zip soap sockets 2>/dev/null || true; \
     done \
-    && apt-get install -y php-pear \
+    && apt-get install -y --no-install-recommends php-pear \
     && apt-get clean all
 
-# UOPZ PER VERSION (for extension_loaded override; not available for all versions — failures silenced):
-RUN for ver in 8.1 8.2 8.3 8.4 8.5; do \
-        apt-get install -y php${ver}-uopz 2>/dev/null || true; \
-    done
-
 # XDEBUG PER VERSION (enabled by default, warnings suppressed):
-RUN for ver in 8.1 8.2 8.3 8.4 8.5; do \
-        apt-get install -y php${ver}-xdebug 2>/dev/null || true; \
+RUN for ver in $PHP_VERSIONS; do \
+        apt-get install -y --no-install-recommends php${ver}-xdebug 2>/dev/null || true; \
         for sapi in fpm cli; do \
             ini="/etc/php/${ver}/${sapi}/conf.d/20-xdebug.ini"; \
             [ -f "$ini" ] || continue; \
@@ -103,26 +102,27 @@ RUN for ver in 8.1 8.2 8.3 8.4 8.5; do \
     done
 
 # MEMORY LIMIT FOR ALL VERSIONS:
-RUN for ver in 8.1 8.2 8.3 8.4 8.5; do \
+RUN for ver in $PHP_VERSIONS; do \
         mkdir -p /etc/php/${ver}/fpm/conf.d; \
         echo "memory_limit = ${M2D_WEB_SERVER_PHP_MEMORY_LIMIT}" \
             > /etc/php/${ver}/fpm/conf.d/99-memory-limit.ini; \
     done
 
 # PHP CONFIG FILES (prepend + custom ini):
-COPY ./services/web-servers/apache/etc/php/prepend.php /usr/local/lib/php/prepend.php
-COPY ./services/web-servers/apache/etc/php/custom.ini  /usr/local/lib/php/custom.ini
-RUN for ver in 8.1 8.2 8.3 8.4 8.5; do \
+COPY ./services/web-servers/apache/etc/php/.prepend.php    /usr/local/lib/php/.prepend.php
+COPY ./services/web-servers/apache/etc/php/custom.ini     /usr/local/lib/php/custom.ini
+COPY ./services/web-servers/apache/etc/php/mailcatcher.ini /usr/local/lib/php/mailcatcher.ini
+RUN for ver in $PHP_VERSIONS; do \
         cp /usr/local/lib/php/custom.ini /etc/php/${ver}/fpm/conf.d/99-custom.ini; \
         cp /usr/local/lib/php/custom.ini /etc/php/${ver}/cli/conf.d/99-custom.ini; \
-        echo "auto_prepend_file = /usr/local/lib/php/prepend.php" \
+        echo "auto_prepend_file = /usr/local/lib/php/.prepend.php" \
             > /etc/php/${ver}/cli/conf.d/99-prepend.ini; \
-        echo "auto_prepend_file = /usr/local/lib/php/prepend.php" \
+        echo "auto_prepend_file = /usr/local/lib/php/.prepend.php" \
             > /etc/php/${ver}/fpm/conf.d/99-prepend.ini; \
     done
 
 # FPM POOL — EACH VERSION GETS ITS OWN UNIX SOCKET:
-RUN for ver in 8.1 8.2 8.3 8.4 8.5; do \
+RUN for ver in $PHP_VERSIONS; do \
         cfg="/etc/php/${ver}/fpm/pool.d/www.conf"; \
         if [ -f "$cfg" ]; then \
             sed -i "s|listen = .*|listen = /run/php/php${ver}-fpm.sock|" "$cfg"; \
@@ -137,7 +137,7 @@ RUN update-alternatives --set php /usr/bin/php${M2D_WEB_SERVER_PHP_VERSION} 2>/d
     ln -sf /usr/bin/php${M2D_WEB_SERVER_PHP_VERSION} /usr/local/bin/php
 
 # DOTLESS CLI ALIASES: php81 → php8.1 etc.
-RUN for ver in 8.1 8.2 8.3 8.4 8.5; do \
+RUN for ver in $PHP_VERSIONS; do \
         ln -sf "/usr/bin/php${ver}" "/usr/local/bin/php$(echo $ver | tr -d '.')"; \
     done
 
@@ -149,8 +149,8 @@ RUN useradd -m magento && echo "magento:magento" | chpasswd \
     && adduser magento sudo
 
 # NODEJS:
-RUN curl -sL https://deb.nodesource.com/setup_20.x | bash \
-    && apt-get install -y nodejs
+RUN curl -sL https://deb.nodesource.com/setup_22.x | bash \
+    && apt-get install -y --no-install-recommends nodejs
 RUN npm install --global yarn
 
 # INSTALL COMPOSER 1 AND COMPOSER 2:
@@ -209,15 +209,18 @@ RUN curl -o /usr/local/bin/n98-magerun2 https://files.magerun.net/n98-magerun2.p
     curl -o /usr/local/bin/m2-convert-for-composer https://raw.githubusercontent.com/isitnikov/m2-convert-patch-for-composer-install/master/convert-for-composer.php; \
     curl -o /etc/bash_completion.d/magento2-bash-completion https://raw.githubusercontent.com/yvoronoy/magento2-bash-completion/master/magento2-bash-completion-enterprise
 
-# ADOBE TOOLS (as root):
+# ADOBE TOOLS: download m2install and patch ES version detection.
+# ES 8+ has no Magento search-engine type name (only elasticsearch5/6/7 and
+# opensearch are accepted).  Return 255 for ES 8+ so getRecommendedSearchEngineForVersion
+# falls through to its Magento-version-based logic:
+#   Magento >= 2.4.7 -> opensearch   (2.4.8 dropped elasticsearch7 entirely)
+#   Magento <  2.4.7 -> elasticsearch7
+# The ELASTICSEARCH_HOST override still routes the connection to the ES8 container.
 RUN curl -o /usr/local/bin/_m2install.sh https://raw.githubusercontent.com/magento-sparta/m2install/master/m2install.sh; \
-    curl -o /etc/bash_completion.d/m2install-bash-completion https://raw.githubusercontent.com/magento-sparta/m2install/master/m2install-bash-completion;
+    curl -o /etc/bash_completion.d/m2install-bash-completion https://raw.githubusercontent.com/magento-sparta/m2install/master/m2install-bash-completion; \
+    sed -i 's/        echo "elasticsearch${elasticSearchVersion%%\.\*}"/        local _major="${elasticSearchVersion%%.*}"\n        [[ "$_major" -gt 7 ]] 2>\/dev\/null \&\& return 255\n        echo "elasticsearch${_major}"/' /usr/local/bin/_m2install.sh;
 
 # MYDUMPER:
-RUN apt-get install -y lsb-release libatomic1
-RUN apt-get -y install libglib2.0-dev zlib1g-dev libpcre3-dev libssl-dev libzstd-dev
-RUN apt-get -y install libmariadb-dev-compat libmariadb-dev
-RUN pip install -U sphinx
 RUN wget -O mydumper.tar.gz https://github.com/mydumper/mydumper/archive/refs/tags/v0.16.1-3.tar.gz && \
     tar xzf mydumper.tar.gz
 COPY ./services/db-engines/mydumper/CMakeLists.txt mydumper-0.16.1-3/
@@ -256,7 +259,11 @@ RUN echo "source /etc/bash_completion" >> ${_HOME_DIRECTORY}/.bashrc \
 
 # ADOBE TOOLS (as magento):
 RUN if [ -d /usr/local/src/m-it ]; then /usr/local/src/m-it/mit-installer.sh; else echo; fi
-RUN sed -i.back '/^export BASH_IT_THEME=/ s/^/# /' ${_HOME_DIRECTORY}/.bashrc
+RUN if [ -d /usr/local/src/m-it ]; then \
+        bash -i -c 'mit enable alias m2install; mit enable alias magento' 2>/dev/null; \
+    else echo; fi
+RUN sed -i.back '/^export BASH_IT_THEME=/ s/^/# /' ${_HOME_DIRECTORY}/.bashrc \
+    && sed -i 's/^# export MIT_CHECK_FOR_UPDATES=.*/export MIT_CHECK_FOR_UPDATES=${MIT_CHECK_FOR_UPDATES:-0}/' ${_HOME_DIRECTORY}/.bashrc
 
 USER root
 RUN chown -R "${_USER}:${_USER}" ${_HOME_DIRECTORY}/.gitconfig ${_HOME_DIRECTORY}/.composer ${_HOME_DIRECTORY}/.m2install.conf*; \
@@ -272,10 +279,10 @@ FROM m2d_web_server_multi_base AS m2d_web_server_multi_base_mailcatcher_no
 
 ## BASE IMAGE WITH MAILCATCHER ##
 FROM m2d_web_server_multi_base AS m2d_web_server_multi_base_mailcatcher_yes
-RUN apt-get update && apt-get install -y msmtp
+RUN apt-get update && apt-get install -y --no-install-recommends msmtp
 COPY ./services/web-servers/apache/etc/msmtprc /etc/msmtprc
-RUN for ver in 8.1 8.2 8.3 8.4 8.5; do \
-        cp /services/web-servers/apache/etc/php/mailcatcher.ini \
+RUN for ver in $PHP_VERSIONS; do \
+        cp /usr/local/lib/php/mailcatcher.ini \
            /etc/php/${ver}/fpm/conf.d/99-mailcatcher.ini 2>/dev/null || true; \
     done
 
@@ -286,17 +293,25 @@ FROM m2d_web_server_multi_mailcatcher AS m2d_web_server_multi_blackfire_no
 
 ## BASE IMAGE WITH BLACKFIRE ##
 FROM m2d_web_server_multi_mailcatcher AS m2d_web_server_multi_blackfire_yes
-RUN version=$(php -r "echo PHP_MAJOR_VERSION.PHP_MINOR_VERSION;") \
-    && curl -A "Docker" -o /tmp/blackfire-probe.tar.gz -D - -L -s https://blackfire.io/api/v1/releases/probe/php/linux/amd64/$version \
-    && mkdir -p /tmp/blackfire \
-    && tar zxpf /tmp/blackfire-probe.tar.gz -C /tmp/blackfire \
-    && mv /tmp/blackfire/blackfire-*.so $(php -r "echo ini_get('extension_dir');")/blackfire.so \
-    && printf "extension=blackfire.so\nblackfire.agent_socket=tcp://blackfire:8707\n" \
-        > /etc/php/${M2D_WEB_SERVER_PHP_VERSION}/fpm/conf.d/blackfire.ini \
-    && rm -rf /tmp/blackfire /tmp/blackfire-probe.tar.gz \
-    && curl -A "Docker" -L https://blackfire.io/api/v1/releases/client/linux_static/amd64 | tar zxp -C /tmp/blackfire \
-    && mv /tmp/blackfire/blackfire /usr/bin/blackfire \
-    && rm -Rf /tmp/blackfire
+# Install Blackfire probe for every PHP version so switch-php works with Blackfire
+RUN for ver in $PHP_VERSIONS; do \
+        phpbin="/usr/bin/php${ver}"; \
+        [ -x "$phpbin" ] || continue; \
+        version=$($phpbin -r "echo PHP_MAJOR_VERSION.PHP_MINOR_VERSION;" 2>/dev/null) || continue; \
+        extdir=$($phpbin -r "echo ini_get('extension_dir');" 2>/dev/null) || continue; \
+        curl -A "Docker" -o /tmp/blackfire-probe.tar.gz -D - -L -s \
+            "https://blackfire.io/api/v1/releases/probe/php/linux/amd64/${version}" \
+            && mkdir -p /tmp/blackfire \
+            && tar zxpf /tmp/blackfire-probe.tar.gz -C /tmp/blackfire \
+            && mv /tmp/blackfire/blackfire-*.so "${extdir}/blackfire.so" \
+            && printf "extension=blackfire.so\nblackfire.agent_socket=tcp://blackfire:8707\n" \
+                > "/etc/php/${ver}/fpm/conf.d/blackfire.ini" \
+            && rm -rf /tmp/blackfire /tmp/blackfire-probe.tar.gz \
+            || echo "WARN: Blackfire probe unavailable for PHP ${ver}"; \
+    done \
+    && curl -A "Docker" -L https://blackfire.io/api/v1/releases/client/linux_static/amd64 \
+        | tar zxp -C /tmp \
+    && mv /tmp/blackfire /usr/bin/blackfire
 
 ## TARGET IMAGE ##
 FROM m2d_web_server_multi_blackfire_${M2D_ENABLE_BLACKFIRE} AS web_server
