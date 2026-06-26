@@ -112,6 +112,7 @@ RUN for ver in $PHP_VERSIONS; do \
 COPY ./services/web-servers/apache/etc/php/.prepend.php    /usr/local/lib/php/.prepend.php
 COPY ./services/web-servers/apache/etc/php/custom.ini     /usr/local/lib/php/custom.ini
 COPY ./services/web-servers/apache/etc/php/mailcatcher.ini /usr/local/lib/php/mailcatcher.ini
+COPY ./services/web-servers/apache/etc/php/newrelic-stub   /usr/local/src/newrelic-stub
 RUN for ver in $PHP_VERSIONS; do \
         cp /usr/local/lib/php/custom.ini /etc/php/${ver}/fpm/conf.d/99-custom.ini; \
         cp /usr/local/lib/php/custom.ini /etc/php/${ver}/cli/conf.d/99-custom.ini; \
@@ -120,6 +121,22 @@ RUN for ver in $PHP_VERSIONS; do \
         echo "auto_prepend_file = /usr/local/lib/php/.prepend.php" \
             > /etc/php/${ver}/fpm/conf.d/99-prepend.ini; \
     done
+
+# NEWRELIC MOCK EXTENSION:
+RUN for ver in $PHP_VERSIONS; do \
+        apt-get install -y --no-install-recommends php${ver}-dev 2>/dev/null || { echo "WARN: php${ver}-dev unavailable, skipping newrelic mock"; continue; }; \
+        cp -r /usr/local/src/newrelic-stub "/tmp/newrelic-build-${ver}" \
+        && cd "/tmp/newrelic-build-${ver}" \
+        && phpize${ver} \
+        && ./configure --with-php-config=php-config${ver} \
+        && make \
+        && make install \
+        && echo "extension=newrelic.so" > "/etc/php/${ver}/fpm/conf.d/20-newrelic.ini" \
+        && echo "extension=newrelic.so" > "/etc/php/${ver}/cli/conf.d/20-newrelic.ini" \
+        || echo "WARN: newrelic mock build failed for PHP ${ver}"; \
+        cd / && rm -rf "/tmp/newrelic-build-${ver}"; \
+    done \
+    && apt-get clean all
 
 # FPM POOL — EACH VERSION GETS ITS OWN UNIX SOCKET:
 RUN for ver in $PHP_VERSIONS; do \
