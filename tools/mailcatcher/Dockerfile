@@ -2,9 +2,8 @@
 ARG M2D_ENABLE_MAILCATCHER='no'
 
 ## prepare a dummy container for the "no" option
-FROM scratch as m2d_mailcatcher_no
-COPY tools/dummy/dummy ./
-CMD ["/dummy"]
+FROM busybox:1.36 as m2d_mailcatcher_no
+CMD ["tail", "-f", "/dev/null"]
 
 ## prepare the actual Mailcatcher container for the "yes" option
 FROM dockage/mailcatcher AS m2d_mailcatcher_yes

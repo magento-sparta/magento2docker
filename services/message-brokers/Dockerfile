@@ -2,9 +2,8 @@ ARG M2D_ENABLE_MESSAGE_BROKER='no'
 ARG M2D_MESSAGE_BROKER_VENDOR='rabbitmq'
 ARG M2D_MESSAGE_BROKER_VERSION='3.8'
 
-FROM scratch as m2d_message_broker_no
-COPY tools/dummy/dummy ./
-CMD ["/dummy"]
+FROM busybox:1.36 as m2d_message_broker_no
+CMD ["tail", "-f", "/dev/null"]
 
 FROM rabbitmq:3.8-management AS m2d_message_broker_rabbitmq_3.8
 FROM rabbitmq:3.9-management AS m2d_message_broker_rabbitmq_3.9

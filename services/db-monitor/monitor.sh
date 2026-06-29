@@ -3,7 +3,9 @@
 INTERVAL=${M2D_DB_MONITOR_INTERVAL:-30}
 MASTER_HOST="db"
 SLAVE_HOST="db_slave"
-MYSQL_OPTS="-u root --password= --connect-timeout=5 -N -s"
+# Array (not a string) so it expands to discrete args without relying on
+# unquoted word-splitting, which zsh does not do by default.
+MYSQL_OPTS=(-u root --password= --connect-timeout=5 -N -s)
 HTML_FILE="/var/www/index.html"
 
 log() {
@@ -97,12 +99,12 @@ HTML
 
 check_master() {
     local result
-    result=$(mysql $MYSQL_OPTS -h "$MASTER_HOST" -e "
+    result=$(mysql "${MYSQL_OPTS[@]}" -h "$MASTER_HOST" -e "
         SELECT CONCAT('server_id=', @@server_id, ' log_bin=', @@log_bin, ' binlog_format=', @@binlog_format);
     " 2>&1) || { MASTER_LEVEL="ERROR"; MASTER_LINE="unreachable: $result"; log "[ERROR] master $MASTER_LINE"; return; }
 
     local pos file position
-    pos=$(mysql $MYSQL_OPTS -h "$MASTER_HOST" -e "SHOW MASTER STATUS" 2>&1)
+    pos=$(mysql "${MYSQL_OPTS[@]}" -h "$MASTER_HOST" -e "SHOW MASTER STATUS" 2>&1)
     file=$(echo "$pos"     | awk '{print $1}')
     position=$(echo "$pos" | awk '{print $2}')
 

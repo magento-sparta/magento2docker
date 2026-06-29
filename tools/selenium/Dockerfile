@@ -2,9 +2,8 @@ ARG M2D_ENABLE_SELENIUM='no'
 ARG M2D_SELENIUM_VERSION='3.14.0'
 ARG M2D_CPU_TYPE='m1'
 
-FROM scratch as m2d_selenium_no
-COPY tools/dummy/dummy ./
-CMD ["/dummy"]
+FROM busybox:1.36 as m2d_selenium_no
+CMD ["tail", "-f", "/dev/null"]
 
 FROM m2d_selenium_no AS m2d_selenium_no_m1
 FROM m2d_selenium_no AS m2d_selenium_no_intel
