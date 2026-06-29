@@ -200,9 +200,15 @@ services:
         - M2D_MESSAGE_BROKER_VERSION=${M2D_MESSAGE_BROKER_VERSION:-3.8}
     container_name: "m2d-messagebroker${M2D_PROJECT_SUFFIX:-}"
     restart: unless-stopped
+    environment:
+      # Used by ActiveMQ Artemis; ignored by RabbitMQ (which keeps guest/guest).
+      - ARTEMIS_USER=${M2D_MESSAGE_BROKER_USER:-admin}
+      - ARTEMIS_PASSWORD=${M2D_MESSAGE_BROKER_PASSWORD:-admin}
     ports:
-      - "${M2D_PORT_FOR_MESSAGE_BROKER:-15672}:15672"
-      - "${M2D_PORT_FOR_MESSAGE_BROKER_AMQP:-5672}:5672"
+      # Host==container so one var drives both sides: RabbitMQ 15672/5672,
+      # ActiveMQ (Artemis) 8161 (console) / 61616 (core acceptor, speaks STOMP).
+      - "${M2D_PORT_FOR_MESSAGE_BROKER:-15672}:${M2D_PORT_FOR_MESSAGE_BROKER:-15672}"
+      - "${M2D_PORT_FOR_MESSAGE_BROKER_AMQP:-5672}:${M2D_PORT_FOR_MESSAGE_BROKER_AMQP:-5672}"
     logging:
       driver: "json-file"
       options:

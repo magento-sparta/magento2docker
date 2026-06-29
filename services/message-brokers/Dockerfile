@@ -11,6 +11,10 @@ FROM rabbitmq:3.11-management AS m2d_message_broker_rabbitmq_3.11
 FROM rabbitmq:3.12-management AS m2d_message_broker_rabbitmq_3.12
 FROM rabbitmq:3.13-management AS m2d_message_broker_rabbitmq_3.13
 
+FROM apache/activemq-artemis:2.37.0 AS m2d_message_broker_activemq_2.37
+FROM apache/activemq-artemis:2.42.0 AS m2d_message_broker_activemq_2.42
+FROM apache/activemq-artemis:2.44.0 AS m2d_message_broker_activemq_2.44
+
 FROM m2d_message_broker_${M2D_MESSAGE_BROKER_VENDOR}_${M2D_MESSAGE_BROKER_VERSION} AS m2d_message_broker_yes
 
 FROM m2d_message_broker_${M2D_ENABLE_MESSAGE_BROKER} AS m2d_message_broker

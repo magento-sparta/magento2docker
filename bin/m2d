@@ -194,7 +194,8 @@ function _m2d_urls ()
     _p "web cache"  "http://localhost:${vcache_port}   ${DIM}[${vcache_vendor} ${vcache_version}]${RESET}${v_flag}"
 
     local b_flag; b_flag=$(_flag "$broker_enabled")
-    _p "msg broker" "http://localhost:${broker_port}   amqp://localhost:${broker_amqp_port}   ${DIM}[${broker_vendor} ${broker_version}]${RESET}${b_flag}"
+    local b_scheme="amqp"; [[ "$broker_vendor" == "activemq" ]] && b_scheme="stomp"
+    _p "msg broker" "http://localhost:${broker_port}   ${b_scheme}://localhost:${broker_amqp_port}   ${DIM}[${broker_vendor} ${broker_version}]${RESET}${b_flag}"
 
     local m_flag; m_flag=$(_flag "$mail_enabled")
     _p "mailcatcher" "http://localhost:${mail_port}   ${DIM}SMTP within Docker: mailcatcher:1025${RESET}${m_flag}"
@@ -297,6 +298,7 @@ Sets configuration value.
 Examples:
 ./bin/m2d set M2D_XDEBUG_IDE_KEY VSCODE
 ./bin/m2d set es 8.4
+./bin/m2d set activemq
 
 Options:
   -h, --help Display help for command
@@ -304,6 +306,10 @@ Options:
 Parameters:
   es       Alias for setting Elasticsearch as the search engine. It will set M2D_SEARCH_ENGINE_VENDOR to 'elasticsearch',
            and M2D_SEARCH_ENGINE_VERSION to '7' if the expected version is not provided as a value
+  activemq Alias for using ActiveMQ (Artemis) as the message broker. Sets M2D_MESSAGE_BROKER_VENDOR to 'activemq',
+           M2D_MESSAGE_BROKER_VERSION to '2.42' (unless provided), and the broker ports to 8161/61616
+  rabbit   Alias for using RabbitMQ as the message broker. Sets M2D_MESSAGE_BROKER_VENDOR to 'rabbitmq',
+           M2D_MESSAGE_BROKER_VERSION to '3.13' (unless provided), and the broker ports to 15672/5672
   php      Alias for parameter M2D_WEB_SERVER_PHP_VERSION
   suffix   Alias for parameter M2D_PROJECT_SUFFIX
   [M2D_*]  Parameter name. A list of possible parameters and their values is in the '.env.example' file
@@ -741,6 +747,18 @@ case $1 in
                 _m2d_env_set_parameter "$M2D_ENV_FILE" "M2D_SEARCH_ENGINE_VENDOR" elasticsearch
                 _m2d_env_set_parameter "$M2D_ENV_FILE" "M2D_SEARCH_ENGINE_VERSION" "${3:-7}"
                 ;;
+            'activemq'|'artemis')
+                _m2d_env_set_parameter "$M2D_ENV_FILE" "M2D_MESSAGE_BROKER_VENDOR"       activemq
+                _m2d_env_set_parameter "$M2D_ENV_FILE" "M2D_MESSAGE_BROKER_VERSION"      "${3:-2.42}"
+                _m2d_env_set_parameter "$M2D_ENV_FILE" "M2D_PORT_FOR_MESSAGE_BROKER"      8161
+                _m2d_env_set_parameter "$M2D_ENV_FILE" "M2D_PORT_FOR_MESSAGE_BROKER_AMQP" 61616
+                ;;
+            'rabbit'|'rabbitmq')
+                _m2d_env_set_parameter "$M2D_ENV_FILE" "M2D_MESSAGE_BROKER_VENDOR"       rabbitmq
+                _m2d_env_set_parameter "$M2D_ENV_FILE" "M2D_MESSAGE_BROKER_VERSION"      "${3:-3.13}"
+                _m2d_env_set_parameter "$M2D_ENV_FILE" "M2D_PORT_FOR_MESSAGE_BROKER"      15672
+                _m2d_env_set_parameter "$M2D_ENV_FILE" "M2D_PORT_FOR_MESSAGE_BROKER_AMQP" 5672
+                ;;
             *)
                 _m2d_env_set_parameter "$M2D_ENV_FILE" "$2" "$3"
                 ;;
@@ -802,7 +820,7 @@ case $1 in
             'db-cache'|'redis')
                 _m2d_env_set_parameter "$M2D_ENV_FILE" M2D_ENABLE_DB_CACHE yes
                 ;;
-            'message-broker'|'rabbit')
+            'message-broker'|'rabbit'|'activemq')
                 _m2d_env_set_parameter "$M2D_ENV_FILE" M2D_ENABLE_MESSAGE_BROKER yes
                 ;;
             'search-engine'|'elastic')
@@ -831,7 +849,7 @@ case $1 in
             'db-cache'|'redis')
                 _m2d_env_set_parameter "$M2D_ENV_FILE" M2D_ENABLE_DB_CACHE no
                 ;;
-            'message-broker'|'rabbit')
+            'message-broker'|'rabbit'|'activemq')
                 _m2d_env_set_parameter "$M2D_ENV_FILE" M2D_ENABLE_MESSAGE_BROKER no
                 ;;
             'search-engine'|'elastic')
