@@ -33,7 +33,259 @@ Commands:
   stop     Stops containers
   sync     Manage data sync from between host and containers
   up       Create and start containers
+  run-magento  Execute a command inside the web container as the magento user
+  urls         List all host-accessible URLs and service endpoints
 "
+}
+
+function _m2d_display_help_run_magento ()
+{
+    echo "
+Usage: ./bin/m2d run-magento [-C <project>] [--] [command [args...]]
+
+Execute a command inside the web container as the magento user.
+If no command is given, an interactive bash shell is opened.
+
+Options:
+  -C, --dir <project>   Change to /var/www/html/<project> before running
+  -h, --help            Display this help
+
+Examples:
+  ./bin/m2d run-magento
+  ./bin/m2d run-magento -C myproject
+  ./bin/m2d run-magento -C myproject bin/magento cache:flush
+  ./bin/m2d run-magento -C myproject bin/magento indexer:reindex
+  ./bin/m2d run-magento composer install
+  ./bin/m2d run-magento yarn install
+"
+}
+
+function _m2d_run_magento ()
+{
+    local env_file="$1"
+    shift
+    local suffix
+    suffix=$(_m2d_env_get_parameter "$env_file" M2D_PROJECT_SUFFIX)
+    local container="m2d-web${suffix}"
+    local workdir="/var/www/html"
+
+    # Parse options
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -C|--dir)
+                workdir="/var/www/html/${2}"
+                shift 2
+                ;;
+            -h|--help)
+                _m2d_display_help_run_magento
+                return 0
+                ;;
+            --)
+                shift
+                break
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+
+    # Check the container is running
+    if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${container}$"; then
+        echo "Container '${container}' is not running. Start it with: ./bin/m2d up"
+        return 1
+    fi
+
+    # Attach a TTY only when stdin is a terminal
+    local tty_flag=""
+    [[ -t 0 ]] && tty_flag="-t"
+
+    if [[ $# -eq 0 ]]; then
+        # Interactive shell — pass terminal dimensions when available
+        local extra_env=()
+        local cols lines
+        cols=$(tput cols 2>/dev/null)   && extra_env+=(--env "COLUMNS=${cols}")
+        lines=$(tput lines 2>/dev/null) && extra_env+=(--env "LINES=${lines}")
+        docker exec -i ${tty_flag} \
+            "${extra_env[@]}" \
+            --user magento \
+            --workdir "$workdir" \
+            "$container" bash
+    else
+        docker exec -i ${tty_flag} \
+            --user magento \
+            --workdir "$workdir" \
+            "$container" "$@"
+    fi
+}
+
+function _m2d_urls ()
+{
+    local env_file="$1"
+    local suffix
+    suffix=$(_m2d_env_get_parameter "$env_file" M2D_PROJECT_SUFFIX)
+
+    # ── helpers ────────────────────────────────────────────────────────────────
+    local BOLD=$'\033[1m' DIM=$'\033[2m' RESET=$'\033[0m' CYAN=$'\033[36m' GREEN=$'\033[32m' YELLOW=$'\033[33m'
+    _p() { printf "  %-18s  %s\n" "$1" "$2"; }
+    _h() { echo ""; printf "${BOLD}${CYAN}%s${RESET}\n" "$1"; printf '%0.s─' {1..60}; echo ""; }
+
+    # ── read .env values ───────────────────────────────────────────────────────
+    local http_port https_port ssh_port
+    http_port=$(_m2d_env_get_parameter "$env_file" M2D_PORT_FOR_WEB_SERVER_HTTP   80)
+    https_port=$(_m2d_env_get_parameter "$env_file" M2D_PORT_FOR_WEB_SERVER_HTTPS 443)
+    ssh_port=$(_m2d_env_get_parameter   "$env_file" M2D_PORT_FOR_WEB_SERVER_SSH   2222)
+
+    local db_port db_slave_port db_monitor_port db_vendor db_version
+    db_port=$(_m2d_env_get_parameter       "$env_file" M2D_PORT_FOR_DB_ENGINE       3306)
+    db_slave_port=$(_m2d_env_get_parameter "$env_file" M2D_PORT_FOR_DB_SLAVE_ENGINE 3307)
+    db_monitor_port=$(_m2d_env_get_parameter "$env_file" M2D_PORT_FOR_DB_MONITOR    8099)
+    db_vendor=$(_m2d_env_get_parameter     "$env_file" M2D_DB_ENGINE_VENDOR         mariadb)
+    db_version=$(_m2d_env_get_parameter    "$env_file" M2D_DB_ENGINE_VERSION        10)
+
+    local search_port search_vendor search_version search_enabled
+    search_port=$(_m2d_env_get_parameter    "$env_file" M2D_PORT_FOR_SEARCH_ENGINE   9200)
+    search_vendor=$(_m2d_env_get_parameter  "$env_file" M2D_SEARCH_ENGINE_VENDOR     elasticsearch)
+    search_version=$(_m2d_env_get_parameter "$env_file" M2D_SEARCH_ENGINE_VERSION    7)
+    search_enabled=$(_m2d_env_get_parameter "$env_file" M2D_ENABLE_SEARCH_ENGINE     yes)
+
+    local broker_port broker_amqp_port broker_vendor broker_version broker_enabled
+    broker_port=$(_m2d_env_get_parameter      "$env_file" M2D_PORT_FOR_MESSAGE_BROKER      15672)
+    broker_amqp_port=$(_m2d_env_get_parameter "$env_file" M2D_PORT_FOR_MESSAGE_BROKER_AMQP 5672)
+    broker_vendor=$(_m2d_env_get_parameter    "$env_file" M2D_MESSAGE_BROKER_VENDOR         rabbitmq)
+    broker_version=$(_m2d_env_get_parameter   "$env_file" M2D_MESSAGE_BROKER_VERSION        3.13)
+    broker_enabled=$(_m2d_env_get_parameter   "$env_file" M2D_ENABLE_MESSAGE_BROKER         no)
+
+    local vcache_port vcache_vendor vcache_version vcache_enabled
+    vcache_port=$(_m2d_env_get_parameter    "$env_file" M2D_PORT_FOR_WEB_CACHE    8080)
+    vcache_vendor=$(_m2d_env_get_parameter  "$env_file" M2D_WEB_CACHE_VENDOR      varnish)
+    vcache_version=$(_m2d_env_get_parameter "$env_file" M2D_WEB_CACHE_VERSION     6)
+    vcache_enabled=$(_m2d_env_get_parameter "$env_file" M2D_ENABLE_WEB_CACHE      no)
+
+    local redis_port redis_vendor redis_version redis_enabled
+    redis_port=$(_m2d_env_get_parameter    "$env_file" M2D_PORT_FOR_DB_CACHE    6379)
+    redis_vendor=$(_m2d_env_get_parameter  "$env_file" M2D_DB_CACHE_VENDOR      redis)
+    redis_version=$(_m2d_env_get_parameter "$env_file" M2D_DB_CACHE_VERSION     6.2)
+    redis_enabled=$(_m2d_env_get_parameter "$env_file" M2D_ENABLE_DB_CACHE      no)
+
+    local mail_port mail_enabled
+    mail_port=$(_m2d_env_get_parameter    "$env_file" M2D_PORT_FOR_MAILCATCHER 1080)
+    mail_enabled=$(_m2d_env_get_parameter "$env_file" M2D_ENABLE_MAILCATCHER   no)
+
+    # ── disabled label helper ──────────────────────────────────────────────────
+    _flag() { [[ "$1" == "yes" ]] && echo "" || echo "  ${DIM}(disabled)${RESET}"; }
+
+    # ── SERVICES section ───────────────────────────────────────────────────────
+    _h "Services"
+
+    _p "web"        "https://localhost:${https_port}   http://localhost:${http_port}"
+    _p "ssh"        "ssh magento@localhost -p ${ssh_port}"
+    _p "database"   "mysql://localhost:${db_port}   ${DIM}db:magento  user:magento  pass:magento  [${db_vendor} ${db_version}]${RESET}"
+    _p "db replica" "mysql://localhost:${db_slave_port}"
+    _p "db monitor" "http://localhost:${db_monitor_port}"
+
+    local s_flag; s_flag=$(_flag "$search_enabled")
+    _p "search"     "http://localhost:${search_port}   ${DIM}[${search_vendor} ${search_version}]${RESET}${s_flag}"
+
+    local r_flag; r_flag=$(_flag "$redis_enabled")
+    _p "db cache"   "redis://localhost:${redis_port}   ${DIM}[${redis_vendor} ${redis_version}]${RESET}${r_flag}"
+
+    local v_flag; v_flag=$(_flag "$vcache_enabled")
+    _p "web cache"  "http://localhost:${vcache_port}   ${DIM}[${vcache_vendor} ${vcache_version}]${RESET}${v_flag}"
+
+    local b_flag; b_flag=$(_flag "$broker_enabled")
+    local b_scheme="amqp"; [[ "$broker_vendor" == "activemq" ]] && b_scheme="stomp"
+    _p "msg broker" "http://localhost:${broker_port}   ${b_scheme}://localhost:${broker_amqp_port}   ${DIM}[${broker_vendor} ${broker_version}]${RESET}${b_flag}"
+
+    local m_flag; m_flag=$(_flag "$mail_enabled")
+    _p "mailcatcher" "http://localhost:${mail_port}   ${DIM}SMTP within Docker: mailcatcher:1025${RESET}${m_flag}"
+
+    # ── PROJECTS section ───────────────────────────────────────────────────────
+    _h "Magento Projects"
+
+    local web_container="m2d-web${suffix}"
+    if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${web_container}$"; then
+        echo "  ${YELLOW}web container not running${RESET} — start with: ./bin/m2d up"
+        echo ""
+        return
+    fi
+
+    # Run discovery script inside the container.
+    # Outputs one line per project:  name:php_seg:upward(0|1):dev_port(or empty)
+    local raw
+    raw=$(docker exec -i "$web_container" bash << 'DISCOVERY'
+APACHE_ROOT="${M2D_APACHE_ROOT_DIRECTORY:-/var/www/html}"
+DEFAULT_PHP="${M2D_WEB_SERVER_PHP_VERSION:-8.3}"
+DEFAULT_SEG="php$(echo "$DEFAULT_PHP" | tr -d '.')"
+
+for project_dir in "$APACHE_ROOT"/*/; do
+    [[ -d "$project_dir" ]] || continue
+    project=$(basename "$project_dir")
+    [[ -f "${project_dir}bin/magento" ]] || continue
+
+    # Detect PHP segment from meta.json
+    php_seg="$DEFAULT_SEG"
+    if [[ -f "${project_dir}meta.json" ]]; then
+        php_bin=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print(d.get('php',''))
+except Exception:
+    pass
+" "${project_dir}meta.json" 2>/dev/null || true)
+        if [[ -n "$php_bin" && -x "$php_bin" ]]; then
+            seg=$("$php_bin" -r 'echo "php".PHP_MAJOR_VERSION.PHP_MINOR_VERSION;' 2>/dev/null) \
+                && php_seg="$seg" || true
+        fi
+    fi
+
+    # UPWARD-PHP active?
+    upward=0
+    grep -q "^SetEnv MAGENTO_BACKEND_URL " "${project_dir}.htaccess" 2>/dev/null && upward=1 || true
+
+    # PWA dev server running?
+    dev_port=""
+    pid_file="/var/run/pwa/${project}.pid"
+    if [[ -f "$pid_file" ]]; then
+        pid=$(cat "$pid_file")
+        if kill -0 "$pid" 2>/dev/null; then
+            dev_port=$(grep "^PWA_PORT=" "${APACHE_ROOT}/${project}/.pwa" 2>/dev/null | cut -d= -f2- || true)
+            dev_port="${dev_port:-?}"
+        fi
+    fi
+
+    echo "${project}:${php_seg}:${upward}:${dev_port}"
+done
+DISCOVERY
+    )
+
+    if [[ -z "$raw" ]]; then
+        echo "  ${DIM}No Magento projects found in the web root.${RESET}"
+        echo "  ${DIM}Install a project first: m2install${RESET}"
+        echo ""
+        return
+    fi
+
+    local first=1
+    while IFS=: read -r name php_seg upward dev_port; do
+        [[ $first -eq 1 ]] && first=0 || echo ""
+        printf "  ${BOLD}%-16s${RESET}  ${DIM}%s${RESET}\n" "$name" "$php_seg"
+
+        if [[ "$upward" == "1" ]]; then
+            # UPWARD-PHP: same URL as Magento, but served as PWA
+            printf "  %-18s  https://%s.%s.127.0.0.1.nip.io/  ${DIM}[PWA via UPWARD-PHP]${RESET}\n" "" "$name" "$php_seg"
+        else
+            printf "  %-18s  https://%s.%s.127.0.0.1.nip.io/\n" "" "$name" "$php_seg"
+        fi
+
+        if [[ -n "$dev_port" ]]; then
+            local port_label=""
+            [[ "$dev_port" != "?" ]] && port_label="  ${DIM}[:${dev_port}]${RESET}"
+            printf "  %-18s  https://pwa-%s.%s.127.0.0.1.nip.io/${GREEN}  ▶ dev server running${RESET}%s\n" "" "$name" "$php_seg" "$port_label"
+        fi
+    done <<< "$raw"
+    echo ""
 }
 
 function _m2d_display_help_set ()
@@ -46,6 +298,7 @@ Sets configuration value.
 Examples:
 ./bin/m2d set M2D_XDEBUG_IDE_KEY VSCODE
 ./bin/m2d set es 8.4
+./bin/m2d set activemq
 
 Options:
   -h, --help Display help for command
@@ -53,6 +306,10 @@ Options:
 Parameters:
   es       Alias for setting Elasticsearch as the search engine. It will set M2D_SEARCH_ENGINE_VENDOR to 'elasticsearch',
            and M2D_SEARCH_ENGINE_VERSION to '7' if the expected version is not provided as a value
+  activemq Alias for using ActiveMQ (Artemis) as the message broker. Sets M2D_MESSAGE_BROKER_VENDOR to 'activemq',
+           M2D_MESSAGE_BROKER_VERSION to '2.42' (unless provided), and the broker ports to 8161/61616
+  rabbit   Alias for using RabbitMQ as the message broker. Sets M2D_MESSAGE_BROKER_VENDOR to 'rabbitmq',
+           M2D_MESSAGE_BROKER_VERSION to '3.13' (unless provided), and the broker ports to 15672/5672
   php      Alias for parameter M2D_WEB_SERVER_PHP_VERSION
   suffix   Alias for parameter M2D_PROJECT_SUFFIX
   [M2D_*]  Parameter name. A list of possible parameters and their values is in the '.env.example' file
@@ -221,7 +478,7 @@ function _m2d_init_source_folder ()
 Please provide a complete or relative path to the folder you want to use for this, e.g., '/Users/adam/src' or '~/src'
 Type the path to a folder you want to use or leave it empty to keep the current '$current_folder': "
 
-    read -p "$prompt" new_folder
+    printf '%s' "$prompt" >&2; read new_folder
 
     if [[ -z "$new_folder" ]]; then
         new_folder="$current_folder"
@@ -231,7 +488,7 @@ Type the path to a folder you want to use or leave it empty to keep the current 
 
     if [[ ! -d "$new_folder" ]]; then
         local confirm
-        read -p "Path '$new_folder' doesn't exist. Do you want to create it? [y/n]: " confirm
+        printf '%s' "Path '$new_folder' doesn't exist. Do you want to create it? [y/n]: " >&2; read confirm
         [[ $confirm == 'y' ]] && mkdir -p "$new_folder"
     fi 
 
@@ -245,7 +502,7 @@ function _m2d_init_env()
 
     echo 'Initializing project...'
     if [[ -f "$env_file" ]]; then
-        read -p 'You already have .env settings file. You can keep it (n) or recreate it (y). Do you want to recreate it? [y/n]: ' confirm
+        printf '%s' 'You already have .env settings file. You can keep it (n) or recreate it (y). Do you want to recreate it? [y/n]: ' >&2; read confirm
         if [[ $confirm == 'y' ]]; then
             cp "$env_file.example" "$env_file"
         fi
@@ -253,7 +510,7 @@ function _m2d_init_env()
         cp "$env_file.example" "$env_file"
     fi
 
-    read -p 'Do you want to provide core Magento2Docker settings (y) or do you want to use current (n)? [y/n]: ' confirm
+    printf '%s' 'Do you want to provide core Magento2Docker settings (y) or do you want to use current (n)? [y/n]: ' >&2; read confirm
     if [[ $confirm != 'y' ]]; then
         echo "Magento2Docker will use settings from this file: '$env_file'"
         echo 'Please verify them before further usage!'
@@ -266,7 +523,7 @@ function _m2d_init_env()
     done
     _m2d_env_set_parameter "$env_file" M2D_SOURCE_DIRECTORY "$value"
 
-    read -p 'Are you on Apple M1/M2 chip? [y/n]: ' confirm
+    printf '%s' 'Are you on Apple M1/M2 chip? [y/n]: ' >&2; read confirm
     if [[ $confirm == 'y' ]]; then
         _m2d_env_set_parameter "$env_file" M2D_CPU_TYPE m1
     else
@@ -274,13 +531,13 @@ function _m2d_init_env()
     fi
 
     value=$(_m2d_env_get_parameter "$env_file" M2D_XDEBUG_IDE_KEY)
-    read -p "Provide IDE key to be used by xDebug (e.g.: PHPSTORM, VSCODE) or leave it empty to keep the current '$value': " value
+    printf '%s' "Provide IDE key to be used by xDebug (e.g.: PHPSTORM, VSCODE) or leave it empty to keep the current '$value': " >&2; read value
     if [[ -n $value ]]; then
         _m2d_env_set_parameter "$env_file" M2D_XDEBUG_IDE_KEY "$value"
     fi
 
     value=$(_m2d_env_get_parameter "$env_file" MAGENTO_CLOUD_CLI_TOKEN)
-    read -p "Provide Magento Cloud CLI authentication token or leave it empty to keep the current '$value': " value
+    printf '%s' "Provide Magento Cloud CLI authentication token or leave it empty to keep the current '$value': " >&2; read value
     if [[ -n $value ]]; then
         _m2d_env_set_parameter "$env_file" MAGENTO_CLOUD_CLI_TOKEN "$value"
     fi
@@ -315,6 +572,25 @@ function _m2d_env_get_parameter ()
     value="${value:=$default}"
 
     echo "$value"
+}
+
+function _m2d_warn_internal_tools ()
+{
+    # The multi Dockerfile attempts to clone two internal Adobe/magento-sparta repos
+    # (cloud-tools and m-it) during the build.  These are only accessible on the
+    # corporate network / with corporate SSH keys.  The build silently skips them
+    # when unreachable, so external / CI builds succeed but the tools won't be present.
+    local vendor
+    vendor=$(_m2d_env_get_parameter "$M2D_ENV_FILE" M2D_WEB_SERVER_VENDOR)
+    if [[ "$vendor" == "multi" ]]; then
+        echo ""
+        echo "  ℹ️  NOTE (multi web server): The Dockerfile tries to clone two internal"
+        echo "     Adobe repos during build (cloud-tools, m-it).  They are silently"
+        echo "     skipped when unreachable — this is expected outside the corporate"
+        echo "     network.  Tools like cloud-dump, cloud-git-url, and mit will be"
+        echo "     absent in that case."
+        echo ""
+    fi
 }
 
 function _m2d_exec_container ()
@@ -443,7 +719,15 @@ function _m2d_sync ()
 }
 
 
-M2D_SCRIPT_DIRECTORY=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd)
+# Resolve this script's directory portably across bash and zsh. zsh has no
+# BASH_SOURCE; the eval-guarded `%x` prompt expansion yields the current file
+# and is hidden from bash's parser inside the single-quoted eval string.
+if [ -n "${ZSH_VERSION:-}" ]; then
+    eval '_m2d_self=${(%):-%x}'
+else
+    _m2d_self="${BASH_SOURCE[0]:-$0}"
+fi
+M2D_SCRIPT_DIRECTORY=$(cd -- "$(dirname -- "$_m2d_self" )" &> /dev/null && pwd)
 M2D_PROJECT_PATH="$(realpath $M2D_SCRIPT_DIRECTORY/../)"
 M2D_ENV_FILE="$M2D_PROJECT_PATH/.env"
 
@@ -462,6 +746,18 @@ case $1 in
             'es')
                 _m2d_env_set_parameter "$M2D_ENV_FILE" "M2D_SEARCH_ENGINE_VENDOR" elasticsearch
                 _m2d_env_set_parameter "$M2D_ENV_FILE" "M2D_SEARCH_ENGINE_VERSION" "${3:-7}"
+                ;;
+            'activemq'|'artemis')
+                _m2d_env_set_parameter "$M2D_ENV_FILE" "M2D_MESSAGE_BROKER_VENDOR"       activemq
+                _m2d_env_set_parameter "$M2D_ENV_FILE" "M2D_MESSAGE_BROKER_VERSION"      "${3:-2.42}"
+                _m2d_env_set_parameter "$M2D_ENV_FILE" "M2D_PORT_FOR_MESSAGE_BROKER"      8161
+                _m2d_env_set_parameter "$M2D_ENV_FILE" "M2D_PORT_FOR_MESSAGE_BROKER_AMQP" 61616
+                ;;
+            'rabbit'|'rabbitmq')
+                _m2d_env_set_parameter "$M2D_ENV_FILE" "M2D_MESSAGE_BROKER_VENDOR"       rabbitmq
+                _m2d_env_set_parameter "$M2D_ENV_FILE" "M2D_MESSAGE_BROKER_VERSION"      "${3:-3.13}"
+                _m2d_env_set_parameter "$M2D_ENV_FILE" "M2D_PORT_FOR_MESSAGE_BROKER"      15672
+                _m2d_env_set_parameter "$M2D_ENV_FILE" "M2D_PORT_FOR_MESSAGE_BROKER_AMQP" 5672
                 ;;
             *)
                 _m2d_env_set_parameter "$M2D_ENV_FILE" "$2" "$3"
@@ -524,7 +820,7 @@ case $1 in
             'db-cache'|'redis')
                 _m2d_env_set_parameter "$M2D_ENV_FILE" M2D_ENABLE_DB_CACHE yes
                 ;;
-            'message-broker'|'rabbit')
+            'message-broker'|'rabbit'|'activemq')
                 _m2d_env_set_parameter "$M2D_ENV_FILE" M2D_ENABLE_MESSAGE_BROKER yes
                 ;;
             'search-engine'|'elastic')
@@ -553,7 +849,7 @@ case $1 in
             'db-cache'|'redis')
                 _m2d_env_set_parameter "$M2D_ENV_FILE" M2D_ENABLE_DB_CACHE no
                 ;;
-            'message-broker'|'rabbit')
+            'message-broker'|'rabbit'|'activemq')
                 _m2d_env_set_parameter "$M2D_ENV_FILE" M2D_ENABLE_MESSAGE_BROKER no
                 ;;
             'search-engine'|'elastic')
@@ -568,6 +864,7 @@ case $1 in
                 _m2d_display_help_up
                 ;;
             '-b'|'--build')
+                _m2d_warn_internal_tools
                 if [[ 'bind' == $(_m2d_env_get_parameter "$M2D_ENV_FILE" M2D_SOURCE_DIRECTORY_SYNC_TYPE) ]]; then
                     docker-compose --project-directory "$M2D_PROJECT_PATH" \
                         -f "$M2D_PROJECT_PATH/docker-compose.yml" \
@@ -612,6 +909,7 @@ case $1 in
                 _m2d_display_help_commad_generic "build"
                 ;;
             *)
+                _m2d_warn_internal_tools
                 if [[ 'bind' == $(_m2d_env_get_parameter "$M2D_ENV_FILE" M2D_SOURCE_DIRECTORY_SYNC_TYPE) ]]; then
                     docker-compose --project-directory "$M2D_PROJECT_PATH" \
                         -f "$M2D_PROJECT_PATH/docker-compose.yml" \
@@ -630,7 +928,7 @@ case $1 in
                 _m2d_display_help_go
                 ;;
             'web')
-                docker exec -it --env COLUMNS=`tput cols` --env LINES=`tput lines` --user magento "m2d-web$(_m2d_env_get_parameter $M2D_ENV_FILE M2D_PROJECT_SUFFIX)" bash
+                docker exec -it --env COLUMNS=`tput cols` --env LINES=`tput lines` --user magento --workdir /var/www/html "m2d-web$(_m2d_env_get_parameter $M2D_ENV_FILE M2D_PROJECT_SUFFIX)" bash
                 ;;
             *)
                 _m2d_exec_container "$2" "$3"
@@ -659,6 +957,22 @@ case $1 in
                 ;;
         esac
         ;;
+
+    'run-magento')
+        case $2 in
+            '-h'|'--help')
+                _m2d_display_help_run_magento
+                ;;
+            *)
+                _m2d_run_magento "$M2D_ENV_FILE" "${@:2}"
+                ;;
+        esac
+        ;;
+
+    'urls')
+        _m2d_urls "$M2D_ENV_FILE"
+        ;;
+
     *)
         _m2d_display_help_main
         ;;

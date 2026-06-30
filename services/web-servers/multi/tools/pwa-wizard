@@ -1,0 +1,878 @@
+#!/bin/bash
+# pwa-wizard — interactive PWA Studio setup guide
+#
+# USAGE
+#   pwa-wizard [project] [options]
+#
+# OPTIONS
+#   --mode dev|upward|both   Pre-select mode (skips prompt)
+#   --store CODE             Store view code for multi-store setups (e.g. en, fr).
+#                            Scopes all steps to that store's PWA directory and meta file.
+#   --backend URL            Backend URL (skips prompt)
+#   --dir PATH               PWA directory (skips prompt)
+#   --dist PATH              Existing dir or .tar.gz to sync from
+#   --php VERSION            PHP version for pwa-build (e.g. 8.4, php84)
+#   --prebuilt               Treat existing upward.yml as final output — skip yarn build,
+#                            run config:set directly. Useful when the dist is already compiled.
+#   --yes                    Auto-confirm all prompts (use defaults)
+#
+# DESCRIPTION
+#   Detects what is already configured and walks through only the
+#   missing steps. Shows the manual command before each step so you
+#   can copy-paste it instead of letting the wizard run it.
+#
+#   Modes:
+#     dev      Node.js dev server  → https://pwa-<project>.<php>.127.0.0.1.nip.io/
+#     upward   UPWARD-PHP, no Node → https://<project>.<php>.127.0.0.1.nip.io/
+#     both     Install once, use either
+#
+#   Individual tools for manual setup:
+#     pwa-install   scaffold or sync a PWA project
+#     pwa-start     start the Node dev server
+#     pwa-stop      stop the Node dev server
+#     pwa-build     yarn build + wire UPWARD-PHP into Magento
+#     pwa-status    show status of all configured projects
+#     pwa-logs      tail the dev server log
+#     pwa-discover  find compiled dists on the filesystem
+
+set -e
+
+source /usr/local/bin/m2d-lib.sh
+
+APACHE_ROOT="${M2D_APACHE_ROOT_DIRECTORY:-/var/www/html}"
+
+# ── Terminal decoration ───────────────────────────────────────────────────────
+
+if [[ -t 1 ]]; then
+    R=$'\033[0m' B=$'\033[1m' DIM=$'\033[2m'
+    GRN=$'\033[0;32m' YLW=$'\033[0;33m' CYN=$'\033[0;36m' RED=$'\033[0;31m'
+else
+    R='' B='' DIM='' GRN='' YLW='' CYN='' RED=''
+fi
+
+ok()    { echo "  ${GRN}✓${R} $*"; }
+warn()  { echo "  ${YLW}!${R} $*"; }
+fail()  { echo "  ${RED}✗${R} $*"; }
+note()  { echo "  ${DIM}→${R} $*"; }
+hint()  { echo "  ${DIM}\$ ${CYN}$*${R}"; }   # show a manual command
+div()   { echo ""; echo "  ${B}$*${R}"; printf "  "; printf '─%.0s' {1..58}; echo ""; }
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+usage() {
+    sed -n '2,/^set -e/p' "$0" | grep '^#' | sed 's/^# \?//'
+    exit "${1:-0}"
+}
+
+# ask_yn "Question?" [y|n]  →  0=yes  1=no
+ask_yn() {
+    local msg="$1" default="${2:-y}"
+    local indicator; [[ "$default" == "y" ]] && indicator="${B}Y${R}/n" || indicator="y/${B}N${R}"
+    if [[ $YES -eq 1 ]]; then note "$msg → yes (--yes)"; return 0; fi
+    local ans
+    read -r -p "  ${CYN}?${R} ${msg} [${indicator}]: " ans
+    ans="${ans:-$default}"
+    [[ "${ans,,}" == "y" ]]
+}
+
+# ask_val "Label" "default" varname
+ask_val() {
+    local label="$1" default="$2" varname="$3"
+    if [[ $YES -eq 1 ]]; then
+        note "${label} → ${default} (--yes)"
+        printf -v "$varname" '%s' "$default"
+        return
+    fi
+    local ans
+    read -r -p "  ${CYN}?${R} ${label} [${DIM}${default}${R}]: " ans
+    printf -v "$varname" '%s' "${ans:-$default}"
+}
+
+# run_step cmd...  — disable set -e, run, capture rc, re-enable
+run_step() {
+    set +e
+    "$@"
+    _rc=$?
+    set -e
+}
+
+# ── Argument parsing ──────────────────────────────────────────────────────────
+
+PROJECT="" MODE="" STORE_CODE="" BACKEND_URL="" CUSTOM_DIR="" DIST_PATH="" PHP_VER="" YES=0 FORCE_PREBUILT=0
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --mode)     MODE="$2";         shift 2 ;;
+        --store)    STORE_CODE="$2";   shift 2 ;;
+        --backend)  BACKEND_URL="$2";  shift 2 ;;
+        --dir)      CUSTOM_DIR="$2";   shift 2 ;;
+        --dist)     DIST_PATH="$2";    shift 2 ;;
+        --php)      PHP_VER="$2";      shift 2 ;;
+        --prebuilt) FORCE_PREBUILT=1;  shift   ;;
+        --yes)      YES=1;             shift   ;;
+        -h|--help)  usage 0 ;;
+        -*)         echo "Unknown option: $1"; usage 1 ;;
+        *)          PROJECT="$1"; shift ;;
+    esac
+done
+
+# Flag fragments forwarded to subcommands
+_PHP_FLAG=""
+[[ -n "$PHP_VER" ]]    && _PHP_FLAG="--php ${PHP_VER}"
+_STORE_FLAG=""
+[[ -n "$STORE_CODE" ]] && _STORE_FLAG="--store ${STORE_CODE}"
+
+# ── Project detection ─────────────────────────────────────────────────────────
+
+[[ -z "$PROJECT" && "$PWD" == "${APACHE_ROOT}/"* ]] && \
+    PROJECT=$(echo "$PWD" | sed "s|^${APACHE_ROOT}/||" | cut -d'/' -f1)
+
+if [[ -z "$PROJECT" ]]; then
+    echo ""
+    # List Magento projects available
+    _found=()
+    for _d in "${APACHE_ROOT}"/*/; do
+        [[ -f "${_d}bin/magento" ]] && _found+=("$(basename "$_d")")
+    done
+    [[ ${#_found[@]} -gt 0 ]] && echo "  Available: ${_found[*]}" && echo ""
+    read -r -p "  ${CYN}?${R} Project name: " PROJECT
+    [[ -z "$PROJECT" ]] && { echo "Error: project name required"; exit 1; }
+fi
+
+MAGENTO_ROOT="${APACHE_ROOT}/${PROJECT}"
+[[ -d "$MAGENTO_ROOT" ]] || { echo "Error: not found: $MAGENTO_ROOT"; exit 1; }
+
+detect_php "$MAGENTO_ROOT"
+
+# ── Install-source detection (.m2install.conf → filesystem fallback) ──────────
+INSTALL_SOURCE=""
+if [[ -f "${MAGENTO_ROOT}/.m2install.conf" ]]; then
+    INSTALL_SOURCE=$(grep "^SOURCE=" "${MAGENTO_ROOT}/.m2install.conf" | cut -d= -f2 || true)
+fi
+if [[ -z "$INSTALL_SOURCE" ]]; then
+    [[ -d "${MAGENTO_ROOT}/.git" ]]         && INSTALL_SOURCE="git"
+    [[ -f "${MAGENTO_ROOT}/composer.lock" ]] && INSTALL_SOURCE="composer"
+fi
+
+# ── State detection ───────────────────────────────────────────────────────────
+
+META_FILE=$(pwa_meta_file "$APACHE_ROOT" "$PROJECT" "$STORE_CODE")
+RUN_KEY=$(pwa_run_key "$PROJECT" "$STORE_CODE")
+PWA_DIR="" dev_port=""
+has_meta=0 has_node_mods=0 has_dist=0 has_prebuilt=0
+dev_running=0 dev_pid="" upward_set=0 connector_ok=0
+
+if [[ -f "$META_FILE" ]]; then
+    has_meta=1
+    PWA_DIR=$(grep "^PWA_DIR=" "$META_FILE" | cut -d= -f2-)
+    dev_port=$(grep "^PWA_PORT=" "$META_FILE" 2>/dev/null | cut -d= -f2- || true)
+fi
+[[ -n "$PWA_DIR" && -d "$PWA_DIR/node_modules" ]] && has_node_mods=1 || true
+[[ -n "$PWA_DIR" && ( -f "$PWA_DIR/dist/upward.yml" || -f "$PWA_DIR/upward.yml" ) ]] && has_dist=1 || true
+# Pre-built: upward.yml present without package.json — no source, no Node dev server possible
+[[ -n "$PWA_DIR" && -f "$PWA_DIR/upward.yml" && ! -f "$PWA_DIR/package.json" ]] && has_prebuilt=1 || true
+# --prebuilt: force pre-built path even when source/node_modules are present
+[[ $FORCE_PREBUILT -eq 1 && $has_meta -eq 1 ]] && has_prebuilt=1 || true
+
+PID_FILE="/var/run/pwa/${RUN_KEY}.pid"
+if [[ -f "$PID_FILE" ]]; then
+    _pid=$(cat "$PID_FILE")
+    kill -0 "$_pid" 2>/dev/null && { dev_running=1; dev_pid="$_pid"; } || true
+fi
+
+if [[ -n "$STORE_CODE" ]]; then
+    # Named store: check meta UPWARD_YML first (written on registration), then fall back to has_dist
+    _meta_upward=$(grep "^UPWARD_YML=" "$META_FILE" 2>/dev/null | cut -d= -f2- || true)
+    if [[ -n "$_meta_upward" && -f "$_meta_upward" ]]; then
+        upward_set=1
+    elif [[ $has_dist -eq 1 ]]; then
+        upward_set=1
+    fi
+else
+    _meta_upward_wiz=$(grep "^UPWARD_YML=" "$META_FILE" 2>/dev/null | cut -d= -f2- || true)
+    if [[ -n "$_meta_upward_wiz" && -f "$_meta_upward_wiz" ]]; then
+        upward_set=1
+    elif grep -q "^SetEnv MAGENTO_BACKEND_URL " "${MAGENTO_ROOT}/.htaccess" 2>/dev/null; then
+        upward_set=1
+    fi
+fi
+
+{ [[ -d "${MAGENTO_ROOT}/vendor/magento/module-upward-connector" ]] ||
+  [[ -d "${MAGENTO_ROOT}/app/code/Magento/UpwardConnector" ]]; } \
+    && connector_ok=1 || true
+
+# Defaults for prompts
+default_pwa_dir=$(pwa_default_dir "$APACHE_ROOT" "$PROJECT" "$STORE_CODE")
+[[ -n "$CUSTOM_DIR" ]] && default_pwa_dir="$CUSTOM_DIR"
+[[ -n "$PWA_DIR"    ]] && default_pwa_dir="$PWA_DIR"
+
+default_backend="https://${PROJECT}.${PHP_SEGMENT}.127.0.0.1.nip.io/pub/"
+[[ -n "$BACKEND_URL" ]] && default_backend="$BACKEND_URL"
+
+# ── Banner + state display ────────────────────────────────────────────────────
+
+echo ""
+printf "  ${B}"; printf '═%.0s' {1..62}; printf "${R}\n"
+echo "  ${B}  pwa-wizard — ${PROJECT}${R}"
+printf "  ${B}"; printf '═%.0s' {1..62}; printf "${R}\n"
+echo ""
+echo "  Project  : ${B}${PROJECT}${R}   PHP: ${PHP_VERSION} [${PHP_DETECTED_FROM}]${STORE_CODE:+   Store: ${STORE_CODE}}"
+[[ -n "$PWA_DIR" ]] && echo "  PWA dir  : ${PWA_DIR}"
+
+div "State"
+
+if [[ $has_node_mods -eq 1 ]]; then
+    ok "PWA installed"
+elif [[ $has_prebuilt -eq 1 ]]; then
+    ok "PWA registered (pre-built output)"
+elif [[ $has_meta -eq 1 ]]; then
+    warn "PWA registered but node_modules missing"
+else
+    fail "No PWA project configured"
+fi
+
+if   [[ $has_dist -eq 1 && $has_prebuilt -eq 1 ]]; then ok   "PWA output ready (pre-built)"
+elif [[ $has_dist -eq 1 ]];                         then ok   "PWA built (dist/upward.yml)"
+elif [[ $has_node_mods -eq 1 ]];                    then note "Not built yet"
+fi
+
+if [[ $dev_running -eq 1 ]]; then
+    ok   "Dev server  running  pid=${dev_pid}  port=${dev_port}"
+    note "  ${CYN}https://pwa-${PROJECT}.${PHP_SEGMENT}.127.0.0.1.nip.io/${R}"
+else
+    note "Dev server  stopped"
+fi
+
+if [[ $upward_set -eq 1 ]]; then
+    ok   "UPWARD-PHP  configured"
+    note "  ${CYN}https://${PROJECT}.${PHP_SEGMENT}.127.0.0.1.nip.io/${R}"
+else
+    note "UPWARD-PHP  not configured"
+fi
+
+if [[ $connector_ok -eq 1 ]]; then
+    ok   "UPWARD connector present"
+else
+    warn "UPWARD connector not found  (UPWARD-PHP mode unavailable)"
+fi
+
+# ── Branch: already installed ─────────────────────────────────────────────────
+
+if [[ $has_node_mods -eq 1 && $FORCE_PREBUILT -eq 0 ]]; then
+
+    # Non-interactive path: --yes + --mode takes direct action
+    if [[ $YES -eq 1 && -n "$MODE" ]]; then
+        case "$MODE" in
+            dev)
+                if [[ $dev_running -eq 0 ]]; then
+                    hint "pwa-start ${PROJECT}${_STORE_FLAG:+ ${_STORE_FLAG}}"
+                    pwa-start "$PROJECT" ${_STORE_FLAG}
+                else
+                    note "Dev server already running — nothing to do"
+                fi
+                ;;
+            upward)
+                if [[ $connector_ok -eq 0 ]]; then
+                    fail "Connector not found — cannot build"
+                else
+                    hint "pwa-build ${PROJECT}${_STORE_FLAG:+ ${_STORE_FLAG}}${_PHP_FLAG:+ ${_PHP_FLAG}}"
+                    pwa-build "$PROJECT" ${_STORE_FLAG} ${_PHP_FLAG}
+                fi
+                ;;
+            both)
+                if [[ $dev_running -eq 0 ]]; then
+                    run_step pwa-start "$PROJECT" ${_STORE_FLAG}
+                    [[ $_rc -ne 0 ]] && warn "pwa-start exited non-zero" || true
+                else
+                    note "Dev server already running"
+                fi
+                if [[ $connector_ok -eq 1 ]]; then
+                    run_step pwa-build "$PROJECT" ${_STORE_FLAG} ${_PHP_FLAG}
+                    [[ $_rc -ne 0 ]] && warn "pwa-build exited non-zero" || true
+                else
+                    warn "Connector not found — skipping UPWARD-PHP"
+                fi
+                ;;
+        esac
+        exit 0
+    fi
+
+    if [[ $YES -eq 1 ]]; then
+        note "Project already configured. Pass --mode dev|upward|both with --yes to act."
+        exit 0
+    fi
+
+    # Interactive maintenance menu — fixed positions so muscle memory works
+    div "What would you like to do?"
+    echo ""
+
+    # Item 1: dev server action — label reflects current state
+    if [[ $dev_running -eq 1 ]]; then
+        _item1="${B}1)${R} Restart dev server  ${DIM}(running, pid ${dev_pid})${R}"
+    else
+        _item1="${B}1)${R} Start dev server"
+    fi
+
+    # Item 2: build — always shown; dim + note when connector is absent
+    if [[ $connector_ok -eq 1 ]]; then
+        if [[ $has_dist -eq 1 ]]; then
+            _item2="${B}2)${R} Rebuild UPWARD-PHP"
+        else
+            _item2="${B}2)${R} Build UPWARD-PHP"
+        fi
+    else
+        _item2="${DIM}2)${R}${DIM} Build UPWARD-PHP  (connector not found — unavailable)${R}"
+    fi
+
+    # Item 4: switch frontend — label and target depend on current UPWARD state
+    if [[ $upward_set -eq 1 ]]; then
+        _item4="${B}4)${R} Switch to Luma  ${DIM}(pwa-off)${R}"
+    elif [[ $has_dist -eq 1 ]]; then
+        _item4="${B}4)${R} Switch to PWA   ${DIM}(pwa-on)${R}"
+    else
+        _item4="${DIM}4)  Switch to PWA   (build first: pwa-build ${PROJECT})${R}"
+    fi
+
+    echo "    ${_item1}"
+    echo "    ${_item2}"
+    echo "    ${B}3)${R} Reinstall  ${DIM}(pwa-install --reset)${R}"
+    echo "    ${_item4}"
+    echo "    ${B}0)${R} Exit"
+    echo ""
+
+    read -r -p "  ${CYN}?${R} Choice [0]: " _c
+    _c="${_c:-0}"
+
+    case "$_c" in
+        1)
+            echo ""
+            if [[ $dev_running -eq 1 ]]; then
+                hint "pwa-stop ${PROJECT}${_STORE_FLAG:+ ${_STORE_FLAG}} && pwa-start ${PROJECT}${_STORE_FLAG:+ ${_STORE_FLAG}}"
+                ask_yn "Restart?" && { pwa-stop "$PROJECT" ${_STORE_FLAG}; pwa-start "$PROJECT" ${_STORE_FLAG}; }
+            else
+                hint "pwa-start ${PROJECT}${_STORE_FLAG:+ ${_STORE_FLAG}}"
+                ask_yn "Start now?" && pwa-start "$PROJECT" ${_STORE_FLAG}
+            fi
+            ;;
+        2)
+            if [[ $connector_ok -eq 0 ]]; then
+                fail "UPWARD connector not found — cannot build"
+            else
+                echo ""
+                hint "pwa-build ${PROJECT}${_STORE_FLAG:+ ${_STORE_FLAG}}${_PHP_FLAG:+ ${_PHP_FLAG}}"
+                ask_yn "Build?" && pwa-build "$PROJECT" ${_STORE_FLAG} ${_PHP_FLAG}
+            fi
+            ;;
+        3)
+            ask_val "PWA directory" "$default_pwa_dir" _dir
+            ask_val "Backend URL"   "$default_backend"  _url
+            echo ""
+            hint "pwa-install ${PROJECT}${_STORE_FLAG:+ ${_STORE_FLAG}} --dir ${_dir} --backend ${_url} --reset"
+            ask_yn "Reinstall?" && \
+                pwa-install "$PROJECT" ${_STORE_FLAG} --dir "$_dir" --backend "$_url" --reset
+            ;;
+        4)
+            echo ""
+            if [[ $upward_set -eq 1 ]]; then
+                hint "pwa-off ${PROJECT}${_STORE_FLAG:+ ${_STORE_FLAG}}"
+                ask_yn "Switch to Luma?" && pwa-off "$PROJECT" ${_STORE_FLAG}
+            elif [[ $has_dist -eq 1 ]]; then
+                hint "pwa-on ${PROJECT}${_STORE_FLAG:+ ${_STORE_FLAG}}"
+                ask_yn "Switch to PWA?" && pwa-on "$PROJECT" ${_STORE_FLAG}
+            else
+                fail "No dist found — run pwa-build ${PROJECT}${_STORE_FLAG:+ ${_STORE_FLAG}} first"
+            fi
+            ;;
+        0)
+            echo "  Exiting."; exit 0
+            ;;
+        *)
+            echo "  Invalid choice."; exit 1
+            ;;
+    esac
+    exit 0
+fi
+
+# ── Branch: pre-built registered (no source, no Node dev server) ─────────────
+
+if [[ $has_prebuilt -eq 1 ]]; then
+
+    # Locate the upward.yml — flat layout (root) takes precedence over dist/
+    if [[ -f "${PWA_DIR}/upward.yml" ]]; then
+        _prebuilt_upward="${PWA_DIR}/upward.yml"
+    elif [[ -f "${PWA_DIR}/dist/upward.yml" ]]; then
+        _prebuilt_upward="${PWA_DIR}/dist/upward.yml"
+    else
+        fail "upward.yml not found in ${PWA_DIR} — run pwa-build first, or omit --prebuilt"
+        exit 1
+    fi
+
+    if [[ $YES -eq 1 && -n "$MODE" && "$MODE" == "upward" ]]; then
+        if [[ $upward_set -eq 1 && $FORCE_PREBUILT -eq 0 ]]; then
+            note "Pre-built UPWARD already configured — nothing to do"
+        elif [[ $connector_ok -eq 0 ]]; then
+            fail "Connector not found — cannot register"
+        else
+            _upward_yml="${_prebuilt_upward}"
+            if [[ -n "$STORE_CODE" ]]; then
+                run_step run_as_magento "$PHP_BIN" "${MAGENTO_ROOT}/bin/magento" \
+                    config:set --scope=stores --scope-code="${STORE_CODE}" \
+                    web/upward/path "$_upward_yml"
+            else
+                run_step run_as_magento "$PHP_BIN" "${MAGENTO_ROOT}/bin/magento" \
+                    config:set web/upward/path "$_upward_yml"
+            fi
+            if [[ $_rc -eq 0 ]]; then
+                run_as_magento "$PHP_BIN" "${MAGENTO_ROOT}/bin/magento" cache:clean 2>/dev/null || true
+                sed -i '/^UPWARD_YML=/d' "$META_FILE" 2>/dev/null || true
+                echo "UPWARD_YML=${_upward_yml}" >> "$META_FILE"
+                upward_set=1
+            else
+                fail "config:set failed (rc=${_rc})"
+            fi
+        fi
+        exit 0
+    fi
+
+    if [[ $YES -eq 1 ]]; then
+        note "Pre-built output registered. Pass --mode upward with --yes to re-register."
+        exit 0
+    fi
+
+    div "What would you like to do?"
+    echo ""
+    if [[ $upward_set -eq 1 && $FORCE_PREBUILT -eq 0 ]]; then
+        _item1="${B}1)${R} Re-register UPWARD-PHP  ${DIM}(already configured)${R}"
+    elif [[ $upward_set -eq 1 && $FORCE_PREBUILT -eq 1 ]]; then
+        _item1="${B}1)${R} Register UPWARD-PHP  ${DIM}(--prebuilt: will overwrite)${R}"
+    elif [[ $connector_ok -eq 0 ]]; then
+        _item1="${DIM}1)${R}${DIM} Register UPWARD-PHP  (connector not found — unavailable)${R}"
+    else
+        _item1="${B}1)${R} Register UPWARD-PHP"
+    fi
+    echo "    ${_item1}"
+    echo "    ${B}0)${R} Exit"
+    echo ""
+    read -r -p "  ${CYN}?${R} Choice [0]: " _c
+    _c="${_c:-0}"
+
+    case "$_c" in
+        1)
+            if [[ $connector_ok -eq 0 ]]; then
+                fail "UPWARD connector not found — cannot register"
+            else
+                _upward_yml="${_prebuilt_upward}"
+                if [[ -n "$STORE_CODE" ]]; then
+                    _reg_args=(config:set --scope=stores --scope-code="${STORE_CODE}" \
+                        web/upward/path "${_upward_yml}")
+                else
+                    _reg_args=(config:set web/upward/path "${_upward_yml}")
+                fi
+                echo ""
+                hint "$PHP_BIN ${MAGENTO_ROOT}/bin/magento ${_reg_args[*]}"
+                hint "$PHP_BIN ${MAGENTO_ROOT}/bin/magento cache:clean"
+                echo ""
+                if ask_yn "Register now?"; then
+                    run_step run_as_magento "$PHP_BIN" "${MAGENTO_ROOT}/bin/magento" \
+                        "${_reg_args[@]}"
+                    if [[ $_rc -eq 0 ]]; then
+                        run_as_magento "$PHP_BIN" "${MAGENTO_ROOT}/bin/magento" \
+                            cache:clean 2>/dev/null || true
+                        # Write UPWARD_YML to meta file (remove old entry first)
+                        sed -i '/^UPWARD_YML=/d' "$META_FILE" 2>/dev/null || true
+                        echo "UPWARD_YML=${_upward_yml}" >> "$META_FILE"
+                        upward_set=1
+                        ok "Registered"
+                    else
+                        fail "config:set failed (rc=${_rc})"
+                    fi
+                else
+                    note "Skipped."
+                fi
+            fi
+            ;;
+        0)
+            echo "  Exiting."; exit 0 ;;
+        *)
+            echo "  Invalid choice."; exit 1 ;;
+    esac
+
+    echo ""
+    printf "  ${B}"; printf '═%.0s' {1..62}; printf "${R}\n"
+    echo "  ${B}  Done${R}"
+    printf "  ${B}"; printf '═%.0s' {1..62}; printf "${R}\n"
+    echo ""
+    [[ $upward_set -eq 1 ]] && \
+        ok "UPWARD-PHP : ${CYN}https://${PROJECT}.${PHP_SEGMENT}.127.0.0.1.nip.io/${STORE_CODE:+${STORE_CODE}/}${R}" || true
+    echo ""
+    echo "  ${DIM}pwa-status ${PROJECT}${_STORE_FLAG:+ ${_STORE_FLAG}}${R}"
+    echo ""
+    exit 0
+fi
+
+# ── Discover PWA output ───────────────────────────────────────────────────────
+# Scan the project for unregistered PWA directories.
+# Uses pwa-discover --porcelain: store_code|pwa_dir|pre_built|backend_url
+#
+# pre_built=1 (no package.json) → skip pwa-install entirely; just run
+#   bin/magento config:set web/upward/path + cache:clean
+# pre_built=0 (has source)      → run pwa-install as before
+
+_disc_stores=()
+_disc_dirs=()
+_disc_prebuilt=()
+_disc_backends=()
+
+while IFS='|' read -r _s _d _p _b; do
+    [[ -z "$_d" ]] && continue
+    # When wizard is store-scoped, filter to that store only
+    [[ -n "$STORE_CODE" && "$_s" != "$STORE_CODE" ]] && continue
+    # Skip stores that already have a meta file
+    _m=$(pwa_meta_file "$APACHE_ROOT" "$PROJECT" "$_s")
+    [[ -f "$_m" ]] && continue
+    _disc_stores+=("$_s")
+    _disc_dirs+=("$_d")
+    [[ $FORCE_PREBUILT -eq 1 ]] && _disc_prebuilt+=("1") || _disc_prebuilt+=("$_p")
+    _disc_backends+=("$_b")
+done < <(pwa-discover "$MAGENTO_ROOT" --project "$PROJECT" --porcelain 2>/dev/null)
+
+_disc_count=${#_disc_stores[@]}
+
+if [[ $_disc_count -gt 0 ]]; then
+    div "Discovered PWA output"
+    echo ""
+    for _i in "${!_disc_stores[@]}"; do
+        _lbl="${_disc_stores[$_i]:-default store}"
+        if [[ "${_disc_prebuilt[$_i]}" == "1" ]]; then
+            _pflag="  ${DIM}[pre-built → config:set only]${R}"
+        else
+            _pflag="  ${DIM}[source → pwa-install]${R}"
+        fi
+        printf "    %2d) ${B}%-18s${R}  %s%s\n" "$((_i+1))" "$_lbl" "${_disc_dirs[$_i]}" "$_pflag"
+    done
+    echo ""
+
+    if [[ $_disc_count -eq 1 ]]; then
+        # ── Single entry ──────────────────────────────────────────────────────
+        _suggested_store="${_disc_stores[0]}"
+        _suggested_dir="${_disc_dirs[0]}"
+        _suggested_pre="${_disc_prebuilt[0]}"
+        _suggested_backend="${_disc_backends[0]}"
+
+        # Adopt discovered store code when wizard wasn't called with --store
+        if [[ -z "$STORE_CODE" && -n "$_suggested_store" ]]; then
+            STORE_CODE="$_suggested_store"
+            _STORE_FLAG="--store ${STORE_CODE}"
+            META_FILE=$(pwa_meta_file "$APACHE_ROOT" "$PROJECT" "$STORE_CODE")
+            RUN_KEY=$(pwa_run_key "$PROJECT" "$STORE_CODE")
+        fi
+
+        if [[ "$_suggested_pre" == "1" ]]; then
+            # Pre-built: wire config:set directly, no install or build needed
+            div "Register pre-built UPWARD output"
+            _upward_yml="${_suggested_dir}/upward.yml"
+            if [[ -n "$STORE_CODE" ]]; then
+                _reg_args=(config:set --scope=stores --scope-code="${STORE_CODE}" \
+                    web/upward/path "${_upward_yml}")
+            else
+                _reg_args=(config:set web/upward/path "${_upward_yml}")
+            fi
+            echo ""
+            hint "$PHP_BIN ${MAGENTO_ROOT}/bin/magento ${_reg_args[*]}"
+            hint "$PHP_BIN ${MAGENTO_ROOT}/bin/magento cache:clean"
+            echo ""
+            _reg_ok=0; _reg_tried=0
+            if ask_yn "Register now?"; then
+                _reg_tried=1
+                run_step run_as_magento "$PHP_BIN" "${MAGENTO_ROOT}/bin/magento" \
+                    "${_reg_args[@]}"
+                if [[ $_rc -eq 0 ]]; then
+                    run_as_magento "$PHP_BIN" "${MAGENTO_ROOT}/bin/magento" \
+                        cache:clean 2>/dev/null || true
+                    printf 'PWA_DIR=%s\nUPWARD_YML=%s\n' "${_suggested_dir}" "${_upward_yml}" > "$META_FILE"
+                    ok "Registered"
+                    _reg_ok=1
+                else
+                    fail "config:set failed (rc=${_rc})"
+                    note "Is Magento installed and the database accessible?"
+                fi
+            else
+                note "Skipped."
+            fi
+            echo ""
+            printf "  ${B}"; printf '═%.0s' {1..62}; printf "${R}\n"
+            echo "  ${B}  Done${R}"
+            printf "  ${B}"; printf '═%.0s' {1..62}; printf "${R}\n"
+            echo ""
+            if [[ $_reg_ok -eq 1 ]]; then
+                ok "UPWARD-PHP : ${CYN}https://${PROJECT}.${PHP_SEGMENT}.127.0.0.1.nip.io/${STORE_CODE:+${STORE_CODE}/}${R}"
+            elif [[ $_reg_tried -eq 1 ]]; then
+                warn "Registration failed — fix the error above, then run:"
+                hint "$PHP_BIN ${MAGENTO_ROOT}/bin/magento ${_reg_args[*]}"
+                hint "$PHP_BIN ${MAGENTO_ROOT}/bin/magento cache:clean"
+            fi
+            echo ""
+            echo "  ${DIM}pwa-status ${PROJECT}${_STORE_FLAG:+ ${_STORE_FLAG}}${R}"
+            echo ""
+            exit 0
+        else
+            # Has source: pre-fill defaults, fall through to normal wizard flow
+            note "Pre-filling install values from discovered output."
+            default_pwa_dir="$_suggested_dir"
+            [[ -n "$_suggested_backend" ]] && default_backend="$_suggested_backend"
+        fi
+    else
+        # ── Multiple entries: offer bulk action then exit ─────────────────────
+        echo "    ${B}0)${R} Skip / proceed with single-store manual setup"
+        echo ""
+        if [[ $YES -eq 1 ]]; then
+            _disc_sel="all"
+            note "Processing all discovered stores (--yes)"
+        else
+            read -r -p "  ${CYN}?${R} Select [all / 1 2 3 / 0 to skip]: " _disc_sel
+            _disc_sel="${_disc_sel:-all}"
+        fi
+
+        if [[ "$_disc_sel" != "0" ]]; then
+            # Build list of array indices to process
+            _disc_idxs=()
+            if [[ "$_disc_sel" == "all" ]]; then
+                for _i in "${!_disc_stores[@]}"; do _disc_idxs+=("$_i"); done
+            else
+                for _n in $_disc_sel; do
+                    if [[ "$_n" =~ ^[0-9]+$ ]] && \
+                       [[ "$_n" -gt 0 ]] && [[ "$_n" -le "$_disc_count" ]]; then
+                        _disc_idxs+=("$(( _n - 1 ))")
+                    fi
+                done
+            fi
+
+            _disc_installed=0
+            _disc_any_prebuilt=0
+            for _i in "${_disc_idxs[@]}"; do
+                _s="${_disc_stores[$_i]}"
+                _d="${_disc_dirs[$_i]}"
+                _p="${_disc_prebuilt[$_i]}"
+                _b="${_disc_backends[$_i]:-$default_backend}"
+                _sf_args=(); [[ -n "$_s" ]] && _sf_args=(--store "$_s")
+                _lbl="${_s:-default store}"
+
+                div "${_lbl}"
+                if [[ "$_p" == "1" ]]; then
+                    # Pre-built: config:set only
+                    _disc_any_prebuilt=1
+                    _upward="${_d}/upward.yml"
+                    if [[ -n "$_s" ]]; then
+                        hint "bin/magento config:set --scope=stores --scope-code=${_s} web/upward/path ${_upward}"
+                        _rargs=(config:set --scope=stores --scope-code="$_s" \
+                            web/upward/path "$_upward")
+                    else
+                        hint "bin/magento config:set web/upward/path ${_upward}"
+                        _rargs=(config:set web/upward/path "$_upward")
+                    fi
+                    echo ""
+                    if ask_yn "Register ${B}${_lbl}${R}?" "y"; then
+                        run_step run_as_magento "$PHP_BIN" \
+                            "${MAGENTO_ROOT}/bin/magento" "${_rargs[@]}"
+                        if [[ $_rc -eq 0 ]]; then
+                            _m=$(pwa_meta_file "$APACHE_ROOT" "$PROJECT" "$_s")
+                            printf 'PWA_DIR=%s\nUPWARD_YML=%s\n' "${_d}" "${_upward}" > "$_m"
+                            _disc_installed=$((_disc_installed + 1))
+                        else
+                            fail "${_lbl}: config:set failed (rc=${_rc})"
+                        fi
+                    else
+                        note "Skipped."
+                    fi
+                else
+                    # Has source: run pwa-install
+                    hint "pwa-install ${PROJECT}${_sf_args[*]:+ ${_sf_args[*]}} --dir ${_d} --backend ${_b}"
+                    echo ""
+                    if ask_yn "Run pwa-install for ${B}${_lbl}${R}?" "y"; then
+                        run_step pwa-install "$PROJECT" "${_sf_args[@]}" \
+                            --dir "$_d" --backend "$_b"
+                        [[ $_rc -eq 0 ]] && \
+                            _disc_installed=$((_disc_installed + 1)) || true
+                    else
+                        note "Skipped."
+                    fi
+                fi
+            done
+
+            # One cache:clean after all config:set calls (best-effort)
+            if [[ $_disc_any_prebuilt -eq 1 && $_disc_installed -gt 0 ]]; then
+                echo ""
+                note "Flushing cache..."
+                run_as_magento "$PHP_BIN" "${MAGENTO_ROOT}/bin/magento" \
+                    cache:clean 2>/dev/null || \
+                    note "cache:clean failed — flush manually after Magento is fully installed"
+            fi
+
+            echo ""
+            printf "  ${B}"; printf '═%.0s' {1..62}; printf "${R}\n"
+            echo "  ${B}  Processed ${_disc_installed} of ${#_disc_idxs[@]} store(s)${R}"
+            printf "  ${B}"; printf '═%.0s' {1..62}; printf "${R}\n"
+            echo ""
+            for _i in "${_disc_idxs[@]}"; do
+                _s="${_disc_stores[$_i]}"
+                _p="${_disc_prebuilt[$_i]}"
+                _lbl="${_s:-default store}"
+                _sf=""; [[ -n "$_s" ]] && _sf=" --store $_s"
+                _m=$(pwa_meta_file "$APACHE_ROOT" "$PROJECT" "$_s")
+                if [[ -f "$_m" ]]; then
+                    if [[ "$_p" == "1" ]]; then
+                        ok "${_lbl}: registered  ${CYN}https://${PROJECT}.${PHP_SEGMENT}.127.0.0.1.nip.io/${_s:+${_s}/}${R}"
+                    else
+                        note "${_lbl}: installed — run pwa-wizard ${PROJECT}${_sf} to continue"
+                    fi
+                fi
+            done
+            echo ""
+            exit 0
+        fi
+        # _disc_sel == "0": fall through to normal single-store wizard flow
+    fi
+fi
+
+# ── First-time setup ──────────────────────────────────────────────────────────
+
+# Mode selection
+if [[ -z "$MODE" ]]; then
+    div "Setup mode"
+    echo ""
+    echo "    1) Dev server    Node.js, live reload"
+    echo "       ${DIM}URL: https://pwa-${PROJECT}.${PHP_SEGMENT}.127.0.0.1.nip.io/${R}"
+    echo ""
+    if [[ $connector_ok -eq 1 ]]; then
+        echo "    2) UPWARD-PHP    Served through Magento, no Node needed"
+        echo "       ${DIM}URL: https://${PROJECT}.${PHP_SEGMENT}.127.0.0.1.nip.io/${R}"
+        echo ""
+        echo "    3) Both          Install once, choose at runtime"
+        echo ""
+        read -r -p "  ${CYN}?${R} Mode [1]: " _m
+        case "${_m:-1}" in
+            2) MODE=upward ;; 3) MODE=both ;; *) MODE=dev ;;
+        esac
+    else
+        echo "    ${DIM}(Options 2+3 require UPWARD connector — not found in this project)${R}"
+        echo ""
+        MODE=dev
+        echo "  Using: dev"
+    fi
+fi
+
+# ── Step: pwa-install ─────────────────────────────────────────────────────────
+
+div "Install PWA project"
+
+if [[ $has_node_mods -eq 0 ]]; then
+    ask_val "PWA directory" "$default_pwa_dir" _dir
+    ask_val "Backend URL"   "$default_backend"  _url
+
+    _icmd="pwa-install ${PROJECT}${_STORE_FLAG:+ ${_STORE_FLAG}} --dir ${_dir} --backend ${_url}"
+    [[ -n "$DIST_PATH" ]] && _icmd="${_icmd} --dist ${DIST_PATH}" || true
+    [[ $has_meta -eq 1  ]] && _icmd="${_icmd} --reset"          || true
+
+    echo ""
+    hint "$_icmd"
+    echo ""
+
+    if ask_yn "Run pwa-install?"; then
+        run_step pwa-install "$PROJECT" ${_STORE_FLAG} \
+            --dir "$_dir" --backend "$_url" \
+            ${DIST_PATH:+--dist "$DIST_PATH"} \
+            $([[ $has_meta -eq 1 ]] && echo --reset)
+        # Re-read PWA_DIR from the meta file (written by pwa-install)
+        PWA_DIR=$(grep "^PWA_DIR=" "$META_FILE" 2>/dev/null | cut -d= -f2- || true)
+        # Trust disk over exit code: yarn create may exit non-zero even after a
+        # successful install (e.g. when prompts were auto-answered via pipe).
+        if [[ -d "${PWA_DIR}/node_modules" ]]; then
+            has_node_mods=1
+            [[ $_rc -ne 0 ]] && warn "pwa-install exited non-zero but node_modules found — continuing" || true
+        elif [[ $_rc -ne 0 ]]; then
+            warn "pwa-install exited non-zero — see output above"
+        fi
+    else
+        note "Skipped. Run the command above manually, then re-run pwa-wizard."
+        exit 0
+    fi
+else
+    ok "Already installed — skipping"
+fi
+
+# ── Step: pwa-start (dev / both) ─────────────────────────────────────────────
+
+if [[ "$MODE" == "dev" || "$MODE" == "both" ]]; then
+    div "Start dev server"
+
+    if [[ $dev_running -eq 1 ]]; then
+        ok "Already running (pid ${dev_pid}) — skipping"
+    elif [[ $has_node_mods -eq 1 ]]; then
+        echo ""
+        hint "pwa-start ${PROJECT}${_STORE_FLAG:+ ${_STORE_FLAG}}"
+        echo ""
+        if ask_yn "Start dev server?"; then
+            run_step pwa-start "$PROJECT" ${_STORE_FLAG}
+            [[ $_rc -eq 0 ]] && dev_running=1 || warn "pwa-start exited non-zero"
+        else
+            note "Skipped. Start manually: pwa-start ${PROJECT}${_STORE_FLAG:+ ${_STORE_FLAG}}"
+        fi
+    else
+        warn "node_modules missing — skipping"
+    fi
+fi
+
+# ── Step: pwa-build (dev / upward / both) ────────────────────────────────────
+
+if [[ "$MODE" == "dev" || "$MODE" == "upward" || "$MODE" == "both" ]]; then
+    div "Build for UPWARD-PHP"
+
+    if [[ $connector_ok -eq 0 ]]; then
+        fail "UPWARD connector not installed"
+        echo ""
+        echo "  Install it first, then re-run: pwa-wizard ${PROJECT} --mode upward"
+        echo ""
+        if [[ "$INSTALL_SOURCE" == "git" ]]; then
+            hint "git clone git@github.com:magento-commerce/magento2-upward-connector.git .pwa-deps/magento2-upward-connector"
+            hint "mkdir -p app/code/Magento"
+            hint "php dev/tools/build-ee.php --command=link --ee-source=.pwa-deps/magento2-upward-connector --ce-source=app/code/Magento"
+        else
+            hint "composer require magento/module-upward-connector"
+        fi
+    elif [[ $has_node_mods -eq 0 ]]; then
+        warn "node_modules not present — install first"
+    elif [[ $upward_set -eq 1 && $has_dist -eq 1 ]]; then
+        ok "Already configured — skipping"
+        note "To rebuild: pwa-build ${PROJECT}${_STORE_FLAG:+ ${_STORE_FLAG}}"
+    else
+        echo ""
+        hint "pwa-build ${PROJECT}${_STORE_FLAG:+ ${_STORE_FLAG}}${_PHP_FLAG:+ ${_PHP_FLAG}}"
+        echo ""
+        if ask_yn "Run pwa-build?"; then
+            run_step pwa-build "$PROJECT" ${_STORE_FLAG} ${_PHP_FLAG}
+            [[ $_rc -eq 0 ]] && upward_set=1 || warn "pwa-build exited non-zero"
+        else
+            note "Skipped. Run manually: pwa-build ${PROJECT}${_STORE_FLAG:+ ${_STORE_FLAG}}"
+        fi
+    fi
+fi
+
+# ── Summary ───────────────────────────────────────────────────────────────────
+
+echo ""
+printf "  ${B}"; printf '═%.0s' {1..62}; printf "${R}\n"
+echo "  ${B}  Done${R}"
+printf "  ${B}"; printf '═%.0s' {1..62}; printf "${R}\n"
+echo ""
+
+[[ $dev_running -eq 1 ]] && \
+    ok "Dev server : ${CYN}$(pwa_dev_url "$RUN_KEY" "$PHP_SEGMENT")${R}" || true
+[[ $upward_set  -eq 1 ]] && \
+    ok "UPWARD-PHP : ${CYN}https://${PROJECT}.${PHP_SEGMENT}.127.0.0.1.nip.io/${STORE_CODE:+${STORE_CODE}/}${R}" || true
+
+echo ""
+echo "  ${DIM}pwa-status ${PROJECT}${_STORE_FLAG:+ ${_STORE_FLAG}}     — check state"
+echo "  pwa-logs ${PROJECT}${_STORE_FLAG:+ ${_STORE_FLAG}} -f    — follow dev server log"
+echo "  pwa-stop ${PROJECT}${_STORE_FLAG:+ ${_STORE_FLAG}}       — stop dev server"
+echo "  pwa-build ${PROJECT}${_STORE_FLAG:+ ${_STORE_FLAG}}      — rebuild UPWARD-PHP${R}"
+echo ""

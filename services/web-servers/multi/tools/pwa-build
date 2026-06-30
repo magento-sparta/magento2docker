@@ -1,0 +1,306 @@
+#!/bin/bash
+# pwa-build — build PWA Studio and wire up UPWARD-PHP in Magento
+#
+# USAGE
+#   pwa-build [project] [options]
+#
+# OPTIONS
+#   --store CODE    Store view code for multi-store setups (e.g. en, fr).
+#                   Sets web/upward/path at the store scope instead of the default scope.
+#                   Omit for single-store / default scope.
+#   --php VERSION   Override detected PHP version for bin/magento calls, e.g. --php 8.3
+#                   Also updates M2D_PHP_BIN in .m2install.conf so future runs use this version.
+#                   Useful when upward-connector needs a newer PHP than the project default.
+#   --prebuilt      Skip yarn build and use the existing upward.yml as-is.
+#                   Checks <pwa-dir>/upward.yml first, then <pwa-dir>/dist/upward.yml.
+#                   Useful when the dist is already compiled (flat layout or previous build).
+#
+# DESCRIPTION
+#   1. Ensures magento/module-upward-connector is installed (aborts if missing)
+#   2. Enables Magento_UpwardConnector, runs setup:upgrade if needed
+#   3. Runs "yarn build" in the PWA project directory
+#   4. Sets web/upward/path to the built upward.yml
+#      (at store scope when --store is given, otherwise at default scope)
+#   5. Flushes cache
+#
+#   After pwa-build, the PWA is served through the existing Magento vhost —
+#   no pwa-start / Node process required.
+#
+#   Single store:   https://<project>.<phpver>.127.0.0.1.nip.io/
+#   Multi-store:    https://<project>.<phpver>.127.0.0.1.nip.io/<store-code>/
+#                   (requires "Add Store Code to URLs" enabled in Magento)
+#
+# NOTES
+#   Run from inside the project dir or pass the project name explicitly.
+
+set -e
+
+source /usr/local/bin/m2d-lib.sh
+
+APACHE_ROOT="${M2D_APACHE_ROOT_DIRECTORY:-/var/www/html}"
+
+# ── Resolve project name and options ─────────────────────────────────────────
+
+usage() {
+    sed -n '2,/^set -e/p' "$0" | grep '^#' | sed 's/^# \?//'
+    exit "${1:-0}"
+}
+
+PROJECT=""
+STORE_CODE=""
+OVERRIDE_PHP=""
+FORCE_PREBUILT=0
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --store)    STORE_CODE="$2";   shift 2 ;;
+        --php)      OVERRIDE_PHP="$2"; shift 2 ;;
+        --prebuilt) FORCE_PREBUILT=1;  shift   ;;
+        -h|--help)  usage 0 ;;
+        -*)         echo "Unknown option: $1"; usage 1 ;;
+        *)          PROJECT="$1"; shift ;;
+    esac
+done
+
+if [[ -z "$PROJECT" ]]; then
+    if [[ "$PWD" == "${APACHE_ROOT}/"* ]]; then
+        PROJECT=$(echo "$PWD" | sed "s|^${APACHE_ROOT}/||" | cut -d'/' -f1)
+        echo "[pwa-build] detected project: $PROJECT"
+    else
+        echo "Error: project name required (or run from inside the project directory)."
+        usage 1
+    fi
+fi
+
+MAGENTO_ROOT="${APACHE_ROOT}/${PROJECT}"
+
+# ── Load project meta ─────────────────────────────────────────────────────────
+
+META_FILE=$(pwa_meta_file "$APACHE_ROOT" "$PROJECT" "$STORE_CODE")
+if [[ ! -f "$META_FILE" ]]; then
+    echo "[pwa-build] Error: no meta file for '${PROJECT}'${STORE_CODE:+ store '${STORE_CODE}'}."
+    echo "  Run: pwa-install ${PROJECT}${STORE_CODE:+ --store ${STORE_CODE}}"
+    exit 1
+fi
+PWA_DIR=$(grep "^PWA_DIR=" "$META_FILE" | cut -d= -f2-)
+
+if [[ ! -d "$PWA_DIR" ]]; then
+    echo "[pwa-build] Error: PWA directory not found: $PWA_DIR"
+    echo "  Run: pwa-install first"
+    exit 1
+fi
+
+# Read backend URL — used to decide whether to add the pub/ RewriteRule.
+_env_backend=$(grep "^MAGENTO_BACKEND_URL=" "${PWA_DIR}/.env" 2>/dev/null | cut -d= -f2- | head -1 || true)
+
+# Pre-built detection: upward.yml present without package.json → skip yarn build
+# --prebuilt flag forces this path even when package.json is present.
+PREBUILT=0
+if [[ $FORCE_PREBUILT -eq 1 ]]; then
+    echo "[pwa-build] --prebuilt: yarn build will be skipped"
+    PREBUILT=1
+elif [[ ! -f "$PWA_DIR/package.json" ]]; then
+    if [[ -f "$PWA_DIR/upward.yml" ]]; then
+        echo "[pwa-build] pre-built output detected — yarn build will be skipped"
+        PREBUILT=1
+    else
+        echo "[pwa-build] Error: no package.json in $PWA_DIR — run pwa-install first"
+        exit 1
+    fi
+fi
+
+if [[ ! -f "$MAGENTO_ROOT/bin/magento" ]]; then
+    echo "[pwa-build] Error: bin/magento not found at $MAGENTO_ROOT"
+    exit 1
+fi
+
+# Detect PHP version for this project (.m2install.conf → .code.tgz → env default)
+detect_php "$MAGENTO_ROOT"
+
+# --php override: resolve binary, update meta.json for future runs
+if [[ -n "$OVERRIDE_PHP" ]]; then
+    _ver="${OVERRIDE_PHP//./}"          # "8.3" → "83", "83" → "83"
+    _ver="${_ver#php}"                  # strip leading "php" if present
+    _candidate="/usr/local/bin/php${_ver}"
+    if [[ ! -x "$_candidate" ]]; then
+        echo "[pwa-build] Error: PHP binary not found: $_candidate"
+        exit 1
+    fi
+    PHP_BIN="$_candidate"
+    PHP_SEGMENT=$("$PHP_BIN" -r 'echo "php".PHP_MAJOR_VERSION.PHP_MINOR_VERSION;')
+    PHP_VERSION=$("$PHP_BIN" -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')
+    PHP_DETECTED_FROM="override"
+    # Persist to .m2install.conf so future runs inherit this choice
+    _conf="${MAGENTO_ROOT}/.m2install.conf"
+    if [[ -f "$_conf" ]]; then
+        sed -i '/^M2D_PHP_BIN=/d' "$_conf"
+        echo "M2D_PHP_BIN=${PHP_BIN}" >> "$_conf"
+    fi
+    echo "[pwa-build] php override: $PHP_BIN — .m2install.conf updated"
+fi
+
+# ── Detect install source from .m2install.conf ───────────────────────────────
+INSTALL_SOURCE=""
+if [[ -f "${MAGENTO_ROOT}/.m2install.conf" ]]; then
+    INSTALL_SOURCE=$(grep "^SOURCE=" "${MAGENTO_ROOT}/.m2install.conf" | cut -d= -f2 || true)
+fi
+# Fallback: filesystem signals (covers projects installed before this wrapper version)
+if [[ -z "$INSTALL_SOURCE" ]]; then
+    if [[ -d "${MAGENTO_ROOT}/.git" ]]; then
+        INSTALL_SOURCE="git"
+    elif [[ -f "${MAGENTO_ROOT}/composer.lock" ]]; then
+        INSTALL_SOURCE="composer"
+    fi
+fi
+
+echo "[pwa-build] project    : $PROJECT${STORE_CODE:+  store: $STORE_CODE}"
+echo "[pwa-build] pwa dir    : $PWA_DIR"
+echo "[pwa-build] magento    : $MAGENTO_ROOT"
+echo "[pwa-build] php        : $PHP_BIN ($PHP_VERSION) [source: $PHP_DETECTED_FROM]"
+echo "[pwa-build] m2 source  : ${INSTALL_SOURCE:-unknown}"
+
+# ── Step 1: verify magento/module-upward-connector is present ─────────────────
+
+echo ""
+echo "[pwa-build] ── Step 1: magento/module-upward-connector ─────────────────"
+cd "$MAGENTO_ROOT"
+
+if [[ -d "app/code/Magento/UpwardConnector" ]]; then
+    echo "[pwa-build] connector: found in app/code"
+elif [[ -d "vendor/magento/module-upward-connector" ]]; then
+    echo "[pwa-build] connector: found in vendor"
+else
+    echo "[pwa-build] Error: magento/module-upward-connector not found."
+    if [[ "$INSTALL_SOURCE" == "git" ]]; then
+        echo "  Git install — clone and link into app/code:"
+        echo "    git clone git@github.com:magento-commerce/magento2-upward-connector.git .pwa-deps/magento2-upward-connector"
+        echo "    mkdir -p app/code/Magento"
+        echo "    php dev/tools/build-ee.php --command=link \\"
+        echo "        --ee-source=.pwa-deps/magento2-upward-connector \\"
+        echo "        --ce-source=app/code/Magento"
+    else
+        echo "  Composer install — require it:"
+        echo "    composer require magento/module-upward-connector"
+    fi
+    exit 1
+fi
+
+# ── Step 2: enable module + setup:upgrade ────────────────────────────────────
+
+echo ""
+echo "[pwa-build] ── Step 2: enable module ───────────────────────────────────"
+
+if run_as_magento "$PHP_BIN" bin/magento module:status Magento_UpwardConnector 2>/dev/null | grep -q "Module is enabled"; then
+    echo "[pwa-build] Magento_UpwardConnector already enabled"
+else
+    run_as_magento "$PHP_BIN" bin/magento module:enable Magento_UpwardConnector --clear-static-content
+    run_as_magento "$PHP_BIN" bin/magento setup:upgrade --no-interaction
+fi
+
+# ── Step 3: yarn build ────────────────────────────────────────────────────────
+
+echo ""
+if [[ $PREBUILT -eq 1 ]]; then
+    echo "[pwa-build] ── Step 3: skipped (pre-built output) ──────────────────────"
+    # Flat layout (root upward.yml) takes precedence over dist/
+    if [[ -f "${PWA_DIR}/upward.yml" ]]; then
+        UPWARD_YML="${PWA_DIR}/upward.yml"
+    elif [[ -f "${PWA_DIR}/dist/upward.yml" ]]; then
+        UPWARD_YML="${PWA_DIR}/dist/upward.yml"
+    else
+        echo "[pwa-build] Error: no upward.yml found in ${PWA_DIR} or ${PWA_DIR}/dist/"
+        echo "  Run yarn build first, or omit --prebuilt"
+        exit 1
+    fi
+    echo "[pwa-build] upward.yml : $UPWARD_YML"
+else
+    echo "[pwa-build] ── Step 3: yarn build ──────────────────────────────────────"
+    cd "$PWA_DIR"
+
+    run_as_magento env NODE_TLS_REJECT_UNAUTHORIZED=0 yarn build
+
+    UPWARD_YML="${PWA_DIR}/dist/upward.yml"
+    if [[ ! -f "$UPWARD_YML" ]]; then
+        UPWARD_YML=$(find "$PWA_DIR/dist" -name "upward.yml" 2>/dev/null | head -1 || true)
+    fi
+    if [[ -z "$UPWARD_YML" || ! -f "$UPWARD_YML" ]]; then
+        echo "[pwa-build] Error: dist/upward.yml not found after build"
+        exit 1
+    fi
+    echo "[pwa-build] upward.yml : $UPWARD_YML"
+fi
+
+# ── Step 4: point Magento at the built upward.yml ────────────────────────────
+
+echo ""
+echo "[pwa-build] ── Step 4: configure web/upward/path ───────────────────────"
+cd "$MAGENTO_ROOT"
+if [[ -n "$STORE_CODE" ]]; then
+    run_as_magento "$PHP_BIN" bin/magento config:set \
+        --scope=stores --scope-code="${STORE_CODE}" \
+        web/upward/path "$UPWARD_YML"
+    echo "[pwa-build] web/upward/path = $UPWARD_YML (scope: stores/${STORE_CODE})"
+else
+    run_as_magento "$PHP_BIN" bin/magento config:set web/upward/path "$UPWARD_YML"
+    echo "[pwa-build] web/upward/path = $UPWARD_YML"
+fi
+# Persist UPWARD_YML in the meta file so pwa-status can report UPWARD state
+# without having to bootstrap Magento (expensive, and may fail on partial installs).
+sed -i '/^UPWARD_YML=/d' "$META_FILE"
+echo "UPWARD_YML=${UPWARD_YML}" >> "$META_FILE"
+
+# ── Step 5: flush cache ───────────────────────────────────────────────────────
+
+echo ""
+echo "[pwa-build] ── Step 5: cache:flush ─────────────────────────────────────"
+run_as_magento "$PHP_BIN" bin/magento cache:flush
+
+# ── Write MAGENTO_BACKEND_URL to .htaccess ───────────────────────────────────
+# Apache passes SetEnv vars to PHP-FPM as FastCGI params; getenv() picks them
+# up natively — no prepend.php or FPM pool changes needed.
+# Only written for the default (non-store) install: for multi-store, each store's
+# backend URL is set in UPWARD config and Magento routes by store code in URL.
+
+if [[ -z "$STORE_CODE" ]]; then
+    if [[ -n "$_env_backend" && -f "${MAGENTO_ROOT}/.htaccess" ]]; then
+        sed -i '/^SetEnv MAGENTO_BACKEND_URL /d' "${MAGENTO_ROOT}/.htaccess"
+        sed -i "1s|^|SetEnv MAGENTO_BACKEND_URL ${_env_backend}\n\n|" "${MAGENTO_ROOT}/.htaccess"
+        echo "[pwa-build] SetEnv MAGENTO_BACKEND_URL written to .htaccess: $_env_backend"
+    fi
+fi
+
+# When the Magento backend URL includes /pub/, the Apache DocumentRoot is the
+# project root (not pub/), so root-level requests for JS/CSS bundles never
+# reach Magento unless we rewrite them into pub/.  Add the rule if missing.
+if [[ "$_env_backend" == *"/pub/"* && -f "${MAGENTO_ROOT}/.htaccess" ]]; then
+    if ! grep -q "^RewriteRule .* pub/" "${MAGENTO_ROOT}/.htaccess"; then
+        if grep -q "^DirectoryIndex" "${MAGENTO_ROOT}/.htaccess"; then
+            sed -i '/^DirectoryIndex/i RewriteRule .* pub/ [L]' "${MAGENTO_ROOT}/.htaccess"
+        else
+            echo "RewriteRule .* pub/ [L]" >> "${MAGENTO_ROOT}/.htaccess"
+        fi
+        echo "[pwa-build] Added RewriteRule .* pub/ [L] to .htaccess (routes root requests through pub/)"
+    fi
+fi
+
+# UPWARD-PHP (Guzzle) makes HTTPS requests to the Magento backend to proxy
+# GraphQL/REST.  In magento2docker the certs are signed by the minica root CA
+# which is not in the system trust store — point Guzzle at it explicitly so
+# SSL verification succeeds.
+if [[ -f "/etc/apache2/ssl/minica.pem" && -f "${MAGENTO_ROOT}/.htaccess" ]]; then
+    sed -i '/^SetEnv CURL_CA_BUNDLE /d' "${MAGENTO_ROOT}/.htaccess"
+    sed -i "1s|^|SetEnv CURL_CA_BUNDLE /etc/apache2/ssl/minica.pem\n|" "${MAGENTO_ROOT}/.htaccess"
+    echo "[pwa-build] SetEnv CURL_CA_BUNDLE written to .htaccess (minica CA for UPWARD-PHP)"
+fi
+
+# ── Done ─────────────────────────────────────────────────────────────────────
+
+echo ""
+echo "[pwa-build] Done!"
+if [[ -n "$STORE_CODE" ]]; then
+    echo "  PWA (UPWARD-PHP): https://${PROJECT}.${PHP_SEGMENT}.127.0.0.1.nip.io/${STORE_CODE}/"
+    echo "  Store ${STORE_CODE} served through Magento (requires 'Add Store Code to URLs' enabled)."
+else
+    echo "  PWA (UPWARD-PHP): https://${PROJECT}.${PHP_SEGMENT}.127.0.0.1.nip.io/"
+    echo "  No Node process needed — served through Magento."
+fi

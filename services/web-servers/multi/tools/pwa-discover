@@ -1,0 +1,328 @@
+#!/bin/bash
+# pwa-discover — locate compiled PWA Studio output and generate pwa-install commands
+#
+# USAGE
+#   pwa-discover [path] [options]
+#
+# OPTIONS
+#   path               Directory to scan (default: current directory)
+#   --project PROJECT  Magento project name (auto-detected when inside a project dir)
+#   --auto             Run pwa-install automatically for each found entry
+#   --depth N          Max depth for upward.yml file scan (default: 5)
+#
+# DESCRIPTION
+#   Two-pass discovery:
+#
+#   Pass 1 — config scan (primary, exact):
+#     Reads all app/etc/env* and app/etc/config* files as PHP in each Magento
+#     project root under the scan path, extracting web/upward/path values at
+#     default and store scopes.  Yields exact paths and store codes directly
+#     — no inference needed.
+#
+#   Pass 2 — file scan (fallback, heuristic):
+#     Finds upward.yml files not already seen in pass 1.
+#     Handles both traditional dist/upward.yml and flat pre-built layouts
+#     (e.g. pwa/ae/upward.yml).  Infers store code from the containing
+#     directory name when it looks like a store code (2-8 lowercase chars,
+#     not a known framework directory name).
+#
+# EXAMPLES
+#   pwa-discover                          # scan current directory
+#   pwa-discover /var/www/html/myproject  # scan a specific project
+#   pwa-discover /var/www/html --auto     # scan all projects, auto-install
+
+set -e
+
+source /usr/local/bin/m2d-lib.sh
+
+APACHE_ROOT="${M2D_APACHE_ROOT_DIRECTORY:-/var/www/html}"
+SCAN_PATH="$PWD"
+PROJECT=""
+AUTO=0
+DEPTH=5
+PORCELAIN=0
+
+usage() {
+    sed -n '2,/^set -e/p' "$0" | grep '^#' | sed 's/^# \?//'
+    exit "${1:-0}"
+}
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --project) PROJECT="$2"; shift 2 ;;
+        --auto)    AUTO=1;       shift   ;;
+        --depth)    DEPTH="$2";  shift 2 ;;
+        --porcelain) PORCELAIN=1; shift  ;;
+        -h|--help) usage 0 ;;
+        -*) echo "Unknown option: $1"; usage 1 ;;
+        *)  SCAN_PATH="$1"; shift ;;
+    esac
+done
+
+SCAN_PATH=$(realpath "$SCAN_PATH" 2>/dev/null || echo "$SCAN_PATH")
+[[ $PORCELAIN -eq 0 ]] && echo "[pwa-discover] scanning: $SCAN_PATH (depth: $DEPTH)"
+
+found=0
+declare -A _seen=()
+
+# ── Infer store code from a directory name ────────────────────────────────────
+# Returns the store code, or empty string when the name is a framework dir or
+# when the directory itself is a project root (parent == APACHE_ROOT).
+_infer_store_code() {
+    local name="$1" dir_path="$2"
+    # Parent is APACHE_ROOT → this dir is a project root, not a store subdir
+    [[ "$(dirname "$dir_path")" == "$APACHE_ROOT" ]] && echo "" && return
+    # Known non-store directory names
+    case "$name" in
+        dist|pwa|src|build|public|static|tmp|var|vendor|\
+        node_modules|packages|media|bundles|generated|setup)
+            echo ""; return ;;
+    esac
+    # 2–8 lowercase letters / digits / underscores, starting with a letter
+    if [[ "$name" =~ ^[a-z][a-z0-9_]{1,7}$ ]]; then
+        echo "$name"
+    else
+        echo ""
+    fi
+}
+
+# ── Derive pwa_dir from an upward.yml path ────────────────────────────────────
+# Traditional dev build:  .../pwa/dist/upward.yml  → pwa_dir = .../pwa
+# Flat pre-built layout:  .../pwa/ae/upward.yml    → pwa_dir = .../pwa/ae
+_pwa_dir_from_upward() {
+    local upward="$1"
+    local parent; parent=$(dirname "$upward")
+    if [[ "$(basename "$parent")" == "dist" ]]; then
+        dirname "$parent"
+    else
+        echo "$parent"
+    fi
+}
+
+# ── Process one discovered entry ──────────────────────────────────────────────
+process_entry() {
+    local upward_path="$1" store_code="${2:-}" source_label="${3:-file}"
+
+    local pwa_dir; pwa_dir=$(_pwa_dir_from_upward "$upward_path")
+
+    # Auto-detect project from path
+    local dp="$PROJECT"
+    if [[ -z "$dp" && "$pwa_dir" == "${APACHE_ROOT}/"* ]]; then
+        dp=$(echo "$pwa_dir" | sed "s|^${APACHE_ROOT}/||" | cut -d'/' -f1)
+    fi
+
+    # Deduplicate by (project, store_code)
+    local dedup_key="${dp:-__unknown__}:${store_code}"
+    [[ -n "${_seen[$dedup_key]+x}" ]] && return
+    _seen["$dedup_key"]=1
+
+    # ── Porcelain mode: machine-readable output for scripted consumers ────────
+    # Format: store_code|pwa_dir|pre_built(0|1)|backend_url
+    # Pipe-delimited so an empty store_code (default store) is never swallowed
+    # as IFS whitespace when consumed with  IFS='|' read -r ...
+    if [[ $PORCELAIN -eq 1 ]]; then
+        local _pre=0; [[ ! -f "${pwa_dir}/package.json" ]] && _pre=1
+        local _b=""
+        [[ -f "${pwa_dir}/.env" ]] && \
+            _b=$(grep "^MAGENTO_BACKEND_URL=" "${pwa_dir}/.env" 2>/dev/null \
+                 | cut -d= -f2- | head -1 || true)
+        printf '%s|%s|%s|%s\n' "$store_code" "$pwa_dir" "$_pre" "$_b"
+        found=$((found + 1))
+        return
+    fi
+
+    echo ""
+    echo "[pwa-discover] ── found ($source_label) ──────────────────────────────────"
+    echo "[pwa-discover] upward   : $upward_path"
+    echo "[pwa-discover] pwa_dir  : $pwa_dir"
+    [[ -n "$store_code" ]] && echo "[pwa-discover] store    : $store_code"
+
+    # Backend URL from .env
+    local backend=""
+    if [[ -f "${pwa_dir}/.env" ]]; then
+        backend=$(grep "^MAGENTO_BACKEND_URL=" "${pwa_dir}/.env" 2>/dev/null \
+                  | cut -d= -f2- | head -1 || true)
+        [[ -n "$backend" ]] && echo "[pwa-discover] backend  : $backend"
+    fi
+
+    # Project
+    if [[ -n "$dp" ]]; then
+        echo "[pwa-discover] project  : $dp"
+    else
+        echo "[pwa-discover] project  : (unknown — pass --project NAME)"
+    fi
+
+    # Pre-built output: no package.json means no source / yarn build not needed
+    if [[ ! -f "${pwa_dir}/package.json" ]]; then
+        echo "[pwa-discover] note     : no package.json — pre-built output (yarn build not needed)"
+    fi
+
+    # Already configured?
+    if [[ -n "$dp" ]]; then
+        local meta; meta=$(pwa_meta_file "$APACHE_ROOT" "$dp" "$store_code")
+        if [[ -f "$meta" ]]; then
+            local existing; existing=$(grep "^PWA_DIR=" "$meta" 2>/dev/null | cut -d= -f2- || true)
+            if [[ "$existing" == "$pwa_dir" ]]; then
+                echo "[pwa-discover] status   : already configured"
+                found=$((found + 1))
+                return
+            fi
+        fi
+    fi
+
+    # ── Build pwa-install command ─────────────────────────────────────────────
+    local _args=()
+    [[ -n "$dp" ]]         && _args+=("$dp")
+    [[ -n "$store_code" ]] && _args+=(--store "$store_code")
+
+    # Colocated = pwa_dir is the project root itself, or any subdir of it
+    if [[ -n "$dp" && \
+          ( "$pwa_dir" == "${APACHE_ROOT}/${dp}" || \
+            "$pwa_dir" == "${APACHE_ROOT}/${dp}/"* ) ]]; then
+        _args+=(--dir "$pwa_dir")
+    else
+        # External — pwa-install will rsync it in
+        _args+=(--dist "$pwa_dir")
+        [[ -n "$dp" ]] && _args+=(--dir "$(pwa_default_dir "$APACHE_ROOT" "$dp" "$store_code")")
+    fi
+
+    [[ -n "$backend" ]] && _args+=(--backend "$backend")
+
+    echo "[pwa-discover] command  : pwa-install ${_args[*]}"
+
+    if [[ $AUTO -eq 1 ]]; then
+        if [[ -z "$dp" ]]; then
+            echo "[pwa-discover] skipping --auto: project unknown (pass --project)"
+        elif [[ ! -f "${pwa_dir}/package.json" ]]; then
+            # Pre-built output: no install needed — wire config:set directly
+            echo "[pwa-discover] pre-built — registering via config:set..."
+            local _proj_root="${APACHE_ROOT}/${dp}"
+            detect_php "$_proj_root" 2>/dev/null || true
+            if [[ -z "${PHP_BIN:-}" ]]; then
+                echo "[pwa-discover] WARNING: no PHP binary found for ${dp} — skipping"
+            else
+                local _upward="${pwa_dir}/upward.yml"
+                local _rc=0
+                if [[ -n "$store_code" ]]; then
+                    run_as_magento "$PHP_BIN" "${_proj_root}/bin/magento" \
+                        config:set --scope=stores --scope-code="$store_code" \
+                        web/upward/path "$_upward" || _rc=$?
+                else
+                    run_as_magento "$PHP_BIN" "${_proj_root}/bin/magento" \
+                        config:set web/upward/path "$_upward" || _rc=$?
+                fi
+                if [[ $_rc -eq 0 ]]; then
+                    run_as_magento "$PHP_BIN" "${_proj_root}/bin/magento" \
+                        cache:clean 2>/dev/null || true
+                    local _meta; _meta=$(pwa_meta_file "$APACHE_ROOT" "$dp" "$store_code")
+                    printf 'PWA_DIR=%s\nUPWARD_YML=%s\n' "${pwa_dir}" "${_upward}" > "$_meta"
+                    echo "[pwa-discover] registered: ${pwa_dir}"
+                else
+                    echo "[pwa-discover] ERROR: config:set failed (rc=${_rc})"
+                fi
+            fi
+        else
+            echo "[pwa-discover] running pwa-install..."
+            pwa-install "${_args[@]}"
+        fi
+    fi
+
+    found=$((found + 1))
+}
+
+# ── Pass 1: config scan ───────────────────────────────────────────────────────
+# Build list of Magento project roots to scan for app/etc/ files.
+declare -a _proj_roots=()
+if [[ -n "$PROJECT" ]]; then
+    _proj_roots=("${APACHE_ROOT}/${PROJECT}")
+elif [[ "$SCAN_PATH" == "${APACHE_ROOT}/"* ]]; then
+    _pn=$(echo "$SCAN_PATH" | sed "s|^${APACHE_ROOT}/||" | cut -d'/' -f1)
+    _proj_roots=("${APACHE_ROOT}/${_pn}")
+else
+    while IFS= read -r _d; do
+        _proj_roots+=("$_d")
+    done < <(find "$SCAN_PATH" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort)
+fi
+
+for _proj_root in "${_proj_roots[@]}"; do
+    [[ -d "${_proj_root}/app/etc" ]] || continue
+
+    # Skip if no env*/config* files exist at all
+    _cf_found=0
+    for _cf in "${_proj_root}"/app/etc/env* "${_proj_root}"/app/etc/config*; do
+        [[ -f "$_cf" ]] && { _cf_found=1; break; }
+    done
+    [[ $_cf_found -eq 0 ]] && continue
+
+    # Need a PHP binary to include() the files
+    detect_php "$_proj_root" 2>/dev/null || true
+    [[ -z "${PHP_BIN:-}" ]] && continue
+
+    [[ $PORCELAIN -eq 0 ]] && echo "[pwa-discover] config scan: $_proj_root"
+
+    # Include every app/etc/env* and app/etc/config* as PHP (regardless of
+    # extension), collect web/upward/path at default and store scopes.
+    # Output format: <scope><TAB><path>
+    # where scope is "default" or "store:<code>".
+    while IFS=$'\t' read -r _scope _upward_path; do
+        [[ -z "$_upward_path" ]] && continue
+        [[ -f "$_upward_path" ]] || continue
+        _sc=""
+        [[ "$_scope" == store:* ]] && _sc="${_scope#store:}"
+        process_entry "$_upward_path" "$_sc" "config"
+    done < <(
+        cd "$_proj_root" && "$PHP_BIN" -r '
+error_reporting(0);
+$paths = [];
+$files = array_merge(
+    glob("app/etc/env*")    ?: [],
+    glob("app/etc/config*") ?: []
+);
+foreach ($files as $f) {
+    if (!is_file($f) || !is_readable($f)) continue;
+    $c = @include $f;
+    if (!is_array($c)) continue;
+    // env.php wraps values under "system"; config.php uses keys directly
+    $sys = isset($c["system"]) ? $c["system"] : $c;
+    foreach (($sys["stores"] ?? []) as $code => $cfg) {
+        $p = $cfg["web"]["upward"]["path"] ?? null;
+        if ($p) $paths["store:{$code}"] = $p;
+    }
+    $p = $sys["default"]["web"]["upward"]["path"] ?? null;
+    if ($p) $paths["default"] = $p;
+}
+foreach ($paths as $k => $v) echo "{$k}\t{$v}\n";
+' 2>/dev/null
+    )
+done
+
+# ── Pass 2: file scan ─────────────────────────────────────────────────────────
+# Find all upward.yml files not already discovered by the config scan.
+while IFS= read -r _yml; do
+    _parent=$(dirname "$_yml")
+    _pname=$(basename "$_parent")
+
+    if [[ "$_pname" == "dist" ]]; then
+        # Traditional dev build layout: dist/upward.yml
+        _store=""
+    else
+        # Flat layout: infer store code from parent dir name
+        _store=$(_infer_store_code "$_pname" "$_parent")
+    fi
+
+    process_entry "$_yml" "$_store" "file"
+done < <(find "$SCAN_PATH" -maxdepth "$DEPTH" \
+              -name "node_modules" -prune -o \
+              -name "upward.yml" -print 2>/dev/null | sort)
+
+# ── Summary ───────────────────────────────────────────────────────────────────
+if [[ $PORCELAIN -eq 0 ]]; then
+    echo ""
+    if [[ $found -eq 0 ]]; then
+        echo "[pwa-discover] no PWA output found under $SCAN_PATH"
+        echo "  pass 1: scanned app/etc/env* + app/etc/config* for web/upward/path"
+        echo "  pass 2: searched for upward.yml files (depth: $DEPTH)"
+    else
+        echo "[pwa-discover] found $found entry/entries"
+    fi
+fi

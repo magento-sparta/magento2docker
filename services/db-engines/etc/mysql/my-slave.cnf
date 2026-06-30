@@ -1,0 +1,11 @@
+[mysqld]
+server-id                            = 2
+relay-log                            = relay-bin
+read-only                            = 1
+
+# Skip "Operation X failed for 'user'" errors (1396).
+# The slave's docker-entrypoint creates the magento user locally; when GTID
+# replication replays the master's binlog from position 0 it hits the same
+# CREATE USER statement and fails.  Safe to skip in dev: the user already
+# exists with correct credentials on both sides.
+slave_skip_errors                    = 1396

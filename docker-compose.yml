@@ -1,5 +1,3 @@
-version: '3'
-
 name: "m2d${M2D_PROJECT_SUFFIX:-}"
 services:
   web:
@@ -18,10 +16,11 @@ services:
     environment:
       - BLACKFIRE_CLIENT_ID
       - BLACKFIRE_CLIENT_TOKEN
-      - MIT_CHECK_FOR_UPDATES
+      - MIT_CHECK_FOR_UPDATES=${MIT_CHECK_FOR_UPDATES:-0}
       - BASH_IT_THEME
       - MAGENTO_CLOUD_CLI_TOKEN
       - M2D_WEB_SERVER_PHP_MEMORY_LIMIT=${M2D_WEB_SERVER_PHP_MEMORY_LIMIT:-2G}
+      - M2D_APACHE_ROOT_DIRECTORY=${M2D_APACHE_ROOT_DIRECTORY:-/var/www/html}
       - "M2INSTALL_GIT_CE_REPO=${M2INSTALL_GIT_CE_REPO:-'git@github.com:magento/magento2.git'}"
       - "M2INSTALL_GIT_EE_REPO=${M2INSTALL_GIT_EE_REPO:-''}"
     ports:
@@ -30,11 +29,16 @@ services:
       - "${M2D_PORT_FOR_WEB_SERVER_SSH:-2222}:22"
     volumes:
       - src-volume:/var/www/html
-      - src-composer-cache-volume:/root/.composer/cache
-      - home-volume:/home
-      - root-volume:/root
+      - ${M2D_WEB_SERVER_VENDOR}-src-composer-cache-volume:/root/.composer/cache
+      - ${M2D_WEB_SERVER_VENDOR}-home-volume:/home
+      - ${M2D_WEB_SERVER_VENDOR}-root-volume:/root
     cap_add:
       - "SYS_PTRACE"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
 
   db:
     build:
@@ -55,22 +59,135 @@ services:
       - "${M2D_PORT_FOR_DB_ENGINE:-3306}:3306"
     volumes:
       - db-volume:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "root", "--silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
-  search_engine:
+#  db_slave:
+#    build:
+#      context: .
+#      dockerfile: services/db-engines/Dockerfile
+#      target: m2d_db_slave_engine
+#      args:
+#        - M2D_DB_ENGINE_VENDOR=${M2D_DB_ENGINE_VENDOR:-mariadb}
+#        - M2D_DB_ENGINE_VERSION=${M2D_DB_ENGINE_VERSION:-10}
+#    container_name: "m2d-db-slave${M2D_PROJECT_SUFFIX:-}"
+#    restart: unless-stopped
+#    environment:
+#      MYSQL_DATABASE: magento
+#      MYSQL_ALLOW_EMPTY_PASSWORD: 1
+#      MYSQL_USER: magento
+#      MYSQL_PASSWORD: magento
+#    ports:
+#      - "${M2D_PORT_FOR_DB_SLAVE_ENGINE:-3307}:3306"
+#    volumes:
+#      - db-slave-volume:/var/lib/mysql
+#    depends_on:
+#      db:
+#        condition: service_healthy
+#    logging:
+#      driver: "json-file"
+#      options:
+#        max-size: "10m"
+#        max-file: "3"
+
+#  db_monitor:
+#    build:
+#      context: .
+#      dockerfile: services/db-monitor/Dockerfile
+#    container_name: "m2d-db-monitor${M2D_PROJECT_SUFFIX:-}"
+#    restart: unless-stopped
+#    environment:
+#      - M2D_DB_MONITOR_INTERVAL=${M2D_DB_MONITOR_INTERVAL:-5}
+#    ports:
+#      - "${M2D_PORT_FOR_DB_MONITOR:-8099}:8080"
+#    depends_on:
+#      db:
+#        condition: service_healthy
+#      db_slave:
+#        condition: service_started
+#    logging:
+#      driver: "json-file"
+#      options:
+#        max-size: "2m"
+#        max-file: "3"
+
+  search_engine_es7:
     build:
       context: .
       dockerfile: services/search-engines/Dockerfile
       target: m2d_search_engine
       args:
-        - M2D_ENABLE_SEARCH_ENGINE=${M2D_ENABLE_SEARCH_ENGINE:-yes}
-        - M2D_SEARCH_ENGINE_VENDOR=${M2D_SEARCH_ENGINE_VENDOR:-elasticsearch}
-        - M2D_SEARCH_ENGINE_VERSION=${M2D_SEARCH_ENGINE_VERSION:-7}
-    container_name: "m2d-searchengine${M2D_PROJECT_SUFFIX:-}"
+        - M2D_ENABLE_SEARCH_ENGINE=${M2D_ENABLE_ES7:-yes}
+        - M2D_SEARCH_ENGINE_VENDOR=elasticsearch
+        - M2D_SEARCH_ENGINE_VERSION=${M2D_ES7_VERSION:-7}
+    container_name: "m2d-searchengine-es7${M2D_PROJECT_SUFFIX:-}"
+    restart: unless-stopped
     environment:
       - "ES_JAVA_OPTS=-Xms128m -Xmx1g"
-      - "OPENSEARCH_JAVA_OPTS=-Xms128m -Xmx1g"
+    volumes:
+      - "m2d-es7-data:/usr/share/elasticsearch/data"
     ports:
-      - "${M2D_PORT_FOR_SEARCH_ENGINE:-9200}:9200"
+      - "${M2D_PORT_FOR_ES7:-9207}:9200"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  search_engine_es8:
+    build:
+      context: .
+      dockerfile: services/search-engines/Dockerfile
+      target: m2d_search_engine
+      args:
+        - M2D_ENABLE_SEARCH_ENGINE=${M2D_ENABLE_ES8:-yes}
+        - M2D_SEARCH_ENGINE_VENDOR=elasticsearch
+        - M2D_SEARCH_ENGINE_VERSION=${M2D_ES8_VERSION:-8}
+    container_name: "m2d-searchengine-es8${M2D_PROJECT_SUFFIX:-}"
+    restart: unless-stopped
+    environment:
+      - "ES_JAVA_OPTS=-Xms128m -Xmx1g"
+    volumes:
+      - "m2d-es8-data:/usr/share/elasticsearch/data"
+    ports:
+      - "${M2D_PORT_FOR_ES8:-9208}:9200"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  search_engine_opensearch:
+    build:
+      context: .
+      dockerfile: services/search-engines/Dockerfile
+      target: m2d_search_engine
+      args:
+        - M2D_ENABLE_SEARCH_ENGINE=${M2D_ENABLE_OPENSEARCH:-yes}
+        - M2D_SEARCH_ENGINE_VENDOR=opensearch
+        - M2D_SEARCH_ENGINE_VERSION=${M2D_OPENSEARCH_VERSION:-2}
+    container_name: "m2d-searchengine-opensearch${M2D_PROJECT_SUFFIX:-}"
+    restart: unless-stopped
+    environment:
+      - "OPENSEARCH_JAVA_OPTS=-Xms128m -Xmx1g"
+    volumes:
+      - "m2d-opensearch-data:/usr/share/opensearch/data"
+    ports:
+      - "${M2D_PORT_FOR_OPENSEARCH:-9200}:9200"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   message_broker:
     build:
@@ -83,8 +200,20 @@ services:
         - M2D_MESSAGE_BROKER_VERSION=${M2D_MESSAGE_BROKER_VERSION:-3.8}
     container_name: "m2d-messagebroker${M2D_PROJECT_SUFFIX:-}"
     restart: unless-stopped
+    environment:
+      # Used by ActiveMQ Artemis; ignored by RabbitMQ (which keeps guest/guest).
+      - ARTEMIS_USER=${M2D_MESSAGE_BROKER_USER:-admin}
+      - ARTEMIS_PASSWORD=${M2D_MESSAGE_BROKER_PASSWORD:-admin}
     ports:
-      - "${M2D_PORT_FOR_MESSAGE_BROKER:-15672}:15672"
+      # Host==container so one var drives both sides: RabbitMQ 15672/5672,
+      # ActiveMQ (Artemis) 8161 (console) / 61616 (core acceptor, speaks STOMP).
+      - "${M2D_PORT_FOR_MESSAGE_BROKER:-15672}:${M2D_PORT_FOR_MESSAGE_BROKER:-15672}"
+      - "${M2D_PORT_FOR_MESSAGE_BROKER_AMQP:-5672}:${M2D_PORT_FOR_MESSAGE_BROKER_AMQP:-5672}"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   web_cache:
     build:
@@ -100,12 +229,18 @@ services:
       - "./services/web-cache/default.vcl:/etc/varnish/default.vcl"
     tmpfs:
       - /var/lib/varnish:exec
-    command: "-p default_keep=300"
     depends_on:
       - "web"
     environment:
       - VARNISH_SIZE=2G
     restart: unless-stopped
+    ports:
+      - "${M2D_PORT_FOR_WEB_CACHE:-8080}:80"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   db_cache:
     build:
@@ -118,6 +253,13 @@ services:
         - M2D_DB_CACHE_VERSION=${M2D_DB_CACHE_VERSION:-6.0}
     container_name: "m2d-dbcache${M2D_PROJECT_SUFFIX:-}"
     restart: unless-stopped
+    ports:
+      - "${M2D_PORT_FOR_DB_CACHE:-6379}:6379"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   mailcatcher:
     build:
@@ -127,8 +269,14 @@ services:
       args:
         - M2D_ENABLE_MAILCATCHER=${M2D_ENABLE_MAILCATCHER:-no}
     container_name: "m2d-mailcatcher${M2D_PROJECT_SUFFIX:-}"
+    restart: unless-stopped
     ports:
       - "${M2D_PORT_FOR_MAILCATCHER:-1080}:1080"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
 
   blackfire:
     build:
@@ -141,6 +289,11 @@ services:
     environment:
         - BLACKFIRE_SERVER_ID
         - BLACKFIRE_SERVER_TOKEN
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
 
   selenium:
     build:
@@ -158,14 +311,26 @@ services:
      - "${M2D_PORT_FOR_SELENIUM_HUB:-4444}:4444"
      - "${M2D_PORT_FOR_SELENIUM_VNC:-5900}:5900"
     shm_size: '2gb'
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 networks:
   default:
     name: "m2d-network${M2D_PROJECT_SUFFIX:-}"
 
 volumes:
-  home-volume:
-  root-volume:
   src-volume:
+  apache-home-volume:
+  apache-root-volume:
+  apache-src-composer-cache-volume:
+  multi-home-volume:
+  multi-root-volume:
+  multi-src-composer-cache-volume:
   db-volume:
-  src-composer-cache-volume:
+  db-slave-volume:
+  m2d-es7-data:
+  m2d-es8-data:
+  m2d-opensearch-data:
