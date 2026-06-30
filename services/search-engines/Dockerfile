@@ -2,9 +2,8 @@ ARG M2D_ENABLE_SEARCH_ENGINE='yes'
 ARG M2D_SEARCH_ENGINE_VENDOR='elasticsearch'
 ARG M2D_SEARCH_ENGINE_VERSION='7'
 
-FROM scratch as m2d_search_engine_no
-COPY tools/dummy/dummy ./
-CMD ["/dummy"]
+FROM busybox:1.36 as m2d_search_engine_no
+CMD ["tail", "-f", "/dev/null"]
 
 FROM m2d_search_engine_no AS m2d_search_engine_no_opensearch
 FROM m2d_search_engine_no AS m2d_search_engine_no_elasticsearch

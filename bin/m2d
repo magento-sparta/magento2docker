@@ -194,7 +194,8 @@ function _m2d_urls ()
     _p "web cache"  "http://localhost:${vcache_port}   ${DIM}[${vcache_vendor} ${vcache_version}]${RESET}${v_flag}"
 
     local b_flag; b_flag=$(_flag "$broker_enabled")
-    _p "msg broker" "http://localhost:${broker_port}   amqp://localhost:${broker_amqp_port}   ${DIM}[${broker_vendor} ${broker_version}]${RESET}${b_flag}"
+    local b_scheme="amqp"; [[ "$broker_vendor" == "activemq" ]] && b_scheme="stomp"
+    _p "msg broker" "http://localhost:${broker_port}   ${b_scheme}://localhost:${broker_amqp_port}   ${DIM}[${broker_vendor} ${broker_version}]${RESET}${b_flag}"
 
     local m_flag; m_flag=$(_flag "$mail_enabled")
     _p "mailcatcher" "http://localhost:${mail_port}   ${DIM}SMTP within Docker: mailcatcher:1025${RESET}${m_flag}"
@@ -297,6 +298,7 @@ Sets configuration value.
 Examples:
 ./bin/m2d set M2D_XDEBUG_IDE_KEY VSCODE
 ./bin/m2d set es 8.4
+./bin/m2d set activemq
 
 Options:
   -h, --help Display help for command
@@ -304,6 +306,10 @@ Options:
 Parameters:
   es       Alias for setting Elasticsearch as the search engine. It will set M2D_SEARCH_ENGINE_VENDOR to 'elasticsearch',
            and M2D_SEARCH_ENGINE_VERSION to '7' if the expected version is not provided as a value
+  activemq Alias for using ActiveMQ (Artemis) as the message broker. Sets M2D_MESSAGE_BROKER_VENDOR to 'activemq',
+           M2D_MESSAGE_BROKER_VERSION to '2.42' (unless provided), and the broker ports to 8161/61616
+  rabbit   Alias for using RabbitMQ as the message broker. Sets M2D_MESSAGE_BROKER_VENDOR to 'rabbitmq',
+           M2D_MESSAGE_BROKER_VERSION to '3.13' (unless provided), and the broker ports to 15672/5672
   php      Alias for parameter M2D_WEB_SERVER_PHP_VERSION
   suffix   Alias for parameter M2D_PROJECT_SUFFIX
   [M2D_*]  Parameter name. A list of possible parameters and their values is in the '.env.example' file
@@ -472,7 +478,7 @@ function _m2d_init_source_folder ()
 Please provide a complete or relative path to the folder you want to use for this, e.g., '/Users/adam/src' or '~/src'
 Type the path to a folder you want to use or leave it empty to keep the current '$current_folder': "
 
-    read -p "$prompt" new_folder
+    printf '%s' "$prompt" >&2; read new_folder
 
     if [[ -z "$new_folder" ]]; then
         new_folder="$current_folder"
@@ -482,7 +488,7 @@ Type the path to a folder you want to use or leave it empty to keep the current 
 
     if [[ ! -d "$new_folder" ]]; then
         local confirm
-        read -p "Path '$new_folder' doesn't exist. Do you want to create it? [y/n]: " confirm
+        printf '%s' "Path '$new_folder' doesn't exist. Do you want to create it? [y/n]: " >&2; read confirm
         [[ $confirm == 'y' ]] && mkdir -p "$new_folder"
     fi 
 
@@ -496,7 +502,7 @@ function _m2d_init_env()
 
     echo 'Initializing project...'
     if [[ -f "$env_file" ]]; then
-        read -p 'You already have .env settings file. You can keep it (n) or recreate it (y). Do you want to recreate it? [y/n]: ' confirm
+        printf '%s' 'You already have .env settings file. You can keep it (n) or recreate it (y). Do you want to recreate it? [y/n]: ' >&2; read confirm
         if [[ $confirm == 'y' ]]; then
             cp "$env_file.example" "$env_file"
         fi
@@ -504,7 +510,7 @@ function _m2d_init_env()
         cp "$env_file.example" "$env_file"
     fi
 
-    read -p 'Do you want to provide core Magento2Docker settings (y) or do you want to use current (n)? [y/n]: ' confirm
+    printf '%s' 'Do you want to provide core Magento2Docker settings (y) or do you want to use current (n)? [y/n]: ' >&2; read confirm
     if [[ $confirm != 'y' ]]; then
         echo "Magento2Docker will use settings from this file: '$env_file'"
         echo 'Please verify them before further usage!'
@@ -517,7 +523,7 @@ function _m2d_init_env()
     done
     _m2d_env_set_parameter "$env_file" M2D_SOURCE_DIRECTORY "$value"
 
-    read -p 'Are you on Apple M1/M2 chip? [y/n]: ' confirm
+    printf '%s' 'Are you on Apple M1/M2 chip? [y/n]: ' >&2; read confirm
     if [[ $confirm == 'y' ]]; then
         _m2d_env_set_parameter "$env_file" M2D_CPU_TYPE m1
     else
@@ -525,13 +531,13 @@ function _m2d_init_env()
     fi
 
     value=$(_m2d_env_get_parameter "$env_file" M2D_XDEBUG_IDE_KEY)
-    read -p "Provide IDE key to be used by xDebug (e.g.: PHPSTORM, VSCODE) or leave it empty to keep the current '$value': " value
+    printf '%s' "Provide IDE key to be used by xDebug (e.g.: PHPSTORM, VSCODE) or leave it empty to keep the current '$value': " >&2; read value
     if [[ -n $value ]]; then
         _m2d_env_set_parameter "$env_file" M2D_XDEBUG_IDE_KEY "$value"
     fi
 
     value=$(_m2d_env_get_parameter "$env_file" MAGENTO_CLOUD_CLI_TOKEN)
-    read -p "Provide Magento Cloud CLI authentication token or leave it empty to keep the current '$value': " value
+    printf '%s' "Provide Magento Cloud CLI authentication token or leave it empty to keep the current '$value': " >&2; read value
     if [[ -n $value ]]; then
         _m2d_env_set_parameter "$env_file" MAGENTO_CLOUD_CLI_TOKEN "$value"
     fi
@@ -713,7 +719,15 @@ function _m2d_sync ()
 }
 
 
-M2D_SCRIPT_DIRECTORY=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd)
+# Resolve this script's directory portably across bash and zsh. zsh has no
+# BASH_SOURCE; the eval-guarded `%x` prompt expansion yields the current file
+# and is hidden from bash's parser inside the single-quoted eval string.
+if [ -n "${ZSH_VERSION:-}" ]; then
+    eval '_m2d_self=${(%):-%x}'
+else
+    _m2d_self="${BASH_SOURCE[0]:-$0}"
+fi
+M2D_SCRIPT_DIRECTORY=$(cd -- "$(dirname -- "$_m2d_self" )" &> /dev/null && pwd)
 M2D_PROJECT_PATH="$(realpath $M2D_SCRIPT_DIRECTORY/../)"
 M2D_ENV_FILE="$M2D_PROJECT_PATH/.env"
 
@@ -732,6 +746,18 @@ case $1 in
             'es')
                 _m2d_env_set_parameter "$M2D_ENV_FILE" "M2D_SEARCH_ENGINE_VENDOR" elasticsearch
                 _m2d_env_set_parameter "$M2D_ENV_FILE" "M2D_SEARCH_ENGINE_VERSION" "${3:-7}"
+                ;;
+            'activemq'|'artemis')
+                _m2d_env_set_parameter "$M2D_ENV_FILE" "M2D_MESSAGE_BROKER_VENDOR"       activemq
+                _m2d_env_set_parameter "$M2D_ENV_FILE" "M2D_MESSAGE_BROKER_VERSION"      "${3:-2.42}"
+                _m2d_env_set_parameter "$M2D_ENV_FILE" "M2D_PORT_FOR_MESSAGE_BROKER"      8161
+                _m2d_env_set_parameter "$M2D_ENV_FILE" "M2D_PORT_FOR_MESSAGE_BROKER_AMQP" 61616
+                ;;
+            'rabbit'|'rabbitmq')
+                _m2d_env_set_parameter "$M2D_ENV_FILE" "M2D_MESSAGE_BROKER_VENDOR"       rabbitmq
+                _m2d_env_set_parameter "$M2D_ENV_FILE" "M2D_MESSAGE_BROKER_VERSION"      "${3:-3.13}"
+                _m2d_env_set_parameter "$M2D_ENV_FILE" "M2D_PORT_FOR_MESSAGE_BROKER"      15672
+                _m2d_env_set_parameter "$M2D_ENV_FILE" "M2D_PORT_FOR_MESSAGE_BROKER_AMQP" 5672
                 ;;
             *)
                 _m2d_env_set_parameter "$M2D_ENV_FILE" "$2" "$3"
@@ -794,7 +820,7 @@ case $1 in
             'db-cache'|'redis')
                 _m2d_env_set_parameter "$M2D_ENV_FILE" M2D_ENABLE_DB_CACHE yes
                 ;;
-            'message-broker'|'rabbit')
+            'message-broker'|'rabbit'|'activemq')
                 _m2d_env_set_parameter "$M2D_ENV_FILE" M2D_ENABLE_MESSAGE_BROKER yes
                 ;;
             'search-engine'|'elastic')
@@ -823,7 +849,7 @@ case $1 in
             'db-cache'|'redis')
                 _m2d_env_set_parameter "$M2D_ENV_FILE" M2D_ENABLE_DB_CACHE no
                 ;;
-            'message-broker'|'rabbit')
+            'message-broker'|'rabbit'|'activemq')
                 _m2d_env_set_parameter "$M2D_ENV_FILE" M2D_ENABLE_MESSAGE_BROKER no
                 ;;
             'search-engine'|'elastic')
