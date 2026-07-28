@@ -307,6 +307,13 @@ RUN docker-php-ext-configure ftp --with-openssl-dir=/usr \
     && docker-php-ext-install ftp
 ## END OF IMAGE ADJUSTMENTS FOR PHP 8.3 ##
 
+## IMAGE ADJUSTEMNTS FOR PHP 8.4 ##
+FROM m2d_web_server_apache_php8x AS m2d_web_server_apache_php8.4
+# PHP EXTENSIONS GD:
+RUN docker-php-ext-configure ftp --with-openssl-dir=/usr \
+    && docker-php-ext-install ftp
+## END OF IMAGE ADJUSTMENTS FOR PHP 8.4 ##
+
 ## TARGET IMAGE ADJUSTEMNTS ##
 FROM m2d_web_server_apache_php${M2D_WEB_SERVER_PHP_VERSION} AS web_server
 # CODESNIFFER:
