@@ -310,7 +310,9 @@ RUN docker-php-ext-configure ftp --with-openssl-dir=/usr \
 ## IMAGE ADJUSTEMNTS FOR PHP 8.4 ##
 FROM m2d_web_server_apache_php8x AS m2d_web_server_apache_php8.4
 # PHP EXTENSIONS GD:
-RUN docker-php-ext-configure ftp --with-openssl-dir=/usr \
+# --with-openssl-dir was removed from ext-ftp's configure options as of PHP 8.4
+# (OpenSSL is auto-detected instead); docker-php-ext-configure ftp needs no args here.
+RUN docker-php-ext-configure ftp \
     && docker-php-ext-install ftp
 ## END OF IMAGE ADJUSTMENTS FOR PHP 8.4 ##
 
