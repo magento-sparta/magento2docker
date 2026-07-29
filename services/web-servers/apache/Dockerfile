@@ -19,6 +19,7 @@ RUN apt-get update \
         libxslt-dev \
         libicu-dev \
         mariadb-client \
+        bsdextrautils \
         pv \
         vim \
         nano \ 
@@ -115,7 +116,8 @@ RUN curl -o /usr/local/bin/n98-magerun2 https://files.magerun.net/n98-magerun2.p
 # ADOBE TOOLS (as root):
 ## Internally we are using m2install from sparta:
 RUN curl -o /usr/local/bin/m2install.sh https://raw.githubusercontent.com/magento-sparta/m2install/master/m2install.sh; \
-    curl -o /etc/bash_completion.d/m2install-bash-completion https://raw.githubusercontent.com/magento-sparta/m2install/master/m2install-bash-completion;
+    curl -o /etc/bash_completion.d/m2install-bash-completion https://raw.githubusercontent.com/magento-sparta/m2install/master/m2install-bash-completion; \
+    touch /usr/local/bin/m2install.csv && chown magento:magento /usr/local/bin/m2install.csv;
 
 # Install Percona Mydumper, it provides myloader utility used by m2install
 #RUN apt-get install -y libatomic1; \
