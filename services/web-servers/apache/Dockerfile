@@ -64,6 +64,12 @@ RUN docker-php-ext-install -j$(nproc) iconv soap sockets \
 ARG M2D_WEB_SERVER_PHP_MEMORY_LIMIT='2G'
 ENV M2D_WEB_SERVER_PHP_MEMORY_LIMIT=${M2D_WEB_SERVER_PHP_MEMORY_LIMIT}
 COPY ./services/web-servers/apache/etc/php/* /usr/local/etc/php/conf.d/
+# The wildcard above doesn't match dotfiles (Docker COPY, like a shell glob,
+# excludes them) - copy .prepend.php explicitly so prepend.ini's
+# auto_prepend_file=/usr/local/etc/php/conf.d/prepend.php actually resolves.
+# Without this every php invocation (composer, pecl, xdebug, ...) fatals with
+# "Failed opening required '/usr/local/etc/php/conf.d/prepend.php'".
+COPY ./services/web-servers/apache/etc/php/.prepend.php /usr/local/etc/php/conf.d/prepend.php
 
 # NODEJS:
 RUN curl -sL https://deb.nodesource.com/setup_20.x | bash \
