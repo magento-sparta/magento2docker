@@ -30,6 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         autoconf \
         automake \
         bash-completion \
+        bsdextrautils \
         ca-certificates \
         cmake \
         curl \
@@ -235,7 +236,8 @@ RUN curl -o /usr/local/bin/n98-magerun2 https://files.magerun.net/n98-magerun2.p
 # The ELASTICSEARCH_HOST override still routes the connection to the ES8 container.
 RUN curl -o /usr/local/bin/_m2install.sh https://raw.githubusercontent.com/magento-sparta/m2install/master/m2install.sh; \
     curl -o /etc/bash_completion.d/m2install-bash-completion https://raw.githubusercontent.com/magento-sparta/m2install/master/m2install-bash-completion; \
-    sed -i 's/        echo "elasticsearch${elasticSearchVersion%%\.\*}"/        local _major="${elasticSearchVersion%%.*}"\n        [[ "$_major" -gt 7 ]] 2>\/dev\/null \&\& return 255\n        echo "elasticsearch${_major}"/' /usr/local/bin/_m2install.sh;
+    sed -i 's/        echo "elasticsearch${elasticSearchVersion%%\.\*}"/        local _major="${elasticSearchVersion%%.*}"\n        [[ "$_major" -gt 7 ]] 2>\/dev\/null \&\& return 255\n        echo "elasticsearch${_major}"/' /usr/local/bin/_m2install.sh; \
+    touch /usr/local/bin/m2install.csv && chown magento:magento /usr/local/bin/m2install.csv;
 
 # MYDUMPER:
 RUN wget -O mydumper.tar.gz https://github.com/mydumper/mydumper/archive/refs/tags/v0.16.1-3.tar.gz && \
