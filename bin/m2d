@@ -22,6 +22,7 @@ Options:
 
 Commands:
   build    Build or rebuild containers
+  clean    Find and optionally remove installed projects older than M2D_STALE_PROJECT_DAYS days
   disable  Disable selected service or tool
   down     Stop and remove containers and networks
   enable   Enable selected service or tool
@@ -286,6 +287,167 @@ DISCOVERY
         fi
     done <<< "$raw"
     echo ""
+}
+
+function _m2d_display_help_clean ()
+{
+    echo "
+Usage: ./bin/m2d clean [OPTIONS]
+
+Find installed Magento projects older than \$M2D_STALE_PROJECT_DAYS days (default 30) and
+offer to remove them, one at a time. Never deletes without an explicit 'y' per project, and
+never touches the shared database — only the project folder and its PWA dev-server state.
+
+Options:
+  -h, --help   Display help for command
+  --dry-run    List stale projects without prompting or changing anything.
+"
+}
+
+function _m2d_confirm ()
+{
+    local prompt="$1" confirm
+    printf '%s' "$prompt" >&2; read confirm
+    [[ $confirm == 'y' ]]
+}
+
+function _m2d_clean_discover ()
+{
+    # Emits one line per installed project, unfiltered by age:
+    #   name:age_days:source(marker|mtime):has_running_pwa(0|1)
+    # Callers decide the staleness threshold. Returns non-zero if the web container isn't up.
+    local env_file="$1"
+    local suffix; suffix=$(_m2d_env_get_parameter "$env_file" M2D_PROJECT_SUFFIX)
+    local web_container="m2d-web${suffix}"
+
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${web_container}$" || return 1
+
+    docker exec -i "$web_container" bash << 'DISCOVERY'
+APACHE_ROOT="${M2D_APACHE_ROOT_DIRECTORY:-/var/www/html}"
+now=$(date -u +%s)
+
+for project_dir in "$APACHE_ROOT"/*/; do
+    [[ -d "$project_dir" ]] || continue
+    project=$(basename "$project_dir")
+    [[ -f "${project_dir}bin/magento" ]] || continue
+
+    # Precise where the multi-variant m2install.sh wrapper stamped it; otherwise fall back to
+    # the project folder's own mtime (labeled so callers can show it's approximate).
+    installed_epoch=""
+    source_label="mtime"
+    installed_at=$(grep "^M2D_INSTALLED_AT=" "${project_dir}.m2install.conf" 2>/dev/null | cut -d= -f2-)
+    if [[ -n "$installed_at" ]]; then
+        installed_epoch=$(date -u -d "$installed_at" +%s 2>/dev/null || echo "")
+        [[ -n "$installed_epoch" ]] && source_label="marker"
+    fi
+    if [[ -z "$installed_epoch" ]]; then
+        installed_epoch=$(stat -c %Y "$project_dir" 2>/dev/null || echo "$now")
+    fi
+    age_days=$(( (now - installed_epoch) / 86400 ))
+
+    has_pwa=0
+    for pidfile in /var/run/pwa/"${project}"*.pid; do
+        [[ -f "$pidfile" ]] || continue
+        pid=$(cat "$pidfile" 2>/dev/null)
+        [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && { has_pwa=1; break; }
+    done
+
+    echo "${project}:${age_days}:${source_label}:${has_pwa}"
+done
+DISCOVERY
+}
+
+function _m2d_clean ()
+{
+    local env_file="$1"
+    local dry_run="${2:-0}"
+    local threshold; threshold=$(_m2d_env_get_parameter "$env_file" M2D_STALE_PROJECT_DAYS 30)
+    local suffix; suffix=$(_m2d_env_get_parameter "$env_file" M2D_PROJECT_SUFFIX)
+    local web_container="m2d-web${suffix}"
+
+    local raw
+    if ! raw=$(_m2d_clean_discover "$env_file"); then
+        echo "web container not running — start with: ./bin/m2d up"
+        return 1
+    fi
+
+    if [[ -z "$raw" ]]; then
+        echo "No Magento projects found."
+        return 0
+    fi
+
+    local -a stale_names=() stale_ages=() stale_sources=() stale_pwas=()
+    while IFS=: read -r name age source_label has_pwa; do
+        [[ -z "$name" ]] && continue
+        (( age >= threshold )) || continue
+        stale_names+=("$name"); stale_ages+=("$age"); stale_sources+=("$source_label"); stale_pwas+=("$has_pwa")
+    done <<< "$raw"
+
+    if [[ ${#stale_names[@]} -eq 0 ]]; then
+        echo "No installs older than ${threshold} days."
+        return 0
+    fi
+
+    echo "Installs older than ${threshold} days:"
+    local i label pwa_note
+    for i in "${!stale_names[@]}"; do
+        label="${stale_sources[$i]}"; [[ "$label" == "mtime" ]] && label="mtime, approximate"
+        pwa_note=""; [[ "${stale_pwas[$i]}" == "1" ]] && pwa_note="  (has a running PWA dev server)"
+        printf "  %-20s  %s days old  (%s)%s\n" "${stale_names[$i]}" "${stale_ages[$i]}" "$label" "$pwa_note"
+    done
+
+    [[ "$dry_run" -eq 1 ]] && return 0
+
+    echo ""
+    local name age src
+    for i in "${!stale_names[@]}"; do
+        name="${stale_names[$i]}"; age="${stale_ages[$i]}"; src="${stale_sources[$i]}"
+        label="$src"; [[ "$label" == "mtime" ]] && label="mtime, approximate"
+
+        if _m2d_confirm "Remove project '${name}' — installed ~${age} days ago (${label})? [y/n]: "; then
+            echo "[clean] Stopping any PWA dev servers for '${name}'..."
+            docker exec -i "$web_container" bash -s -- "$name" << 'STOPALL'
+APACHE_ROOT="${M2D_APACHE_ROOT_DIRECTORY:-/var/www/html}"
+project="$1"
+for meta in "${APACHE_ROOT}/${project}"/.pwa.*; do
+    [[ -f "$meta" ]] || continue
+    base=$(basename "$meta")
+    store="${base#.pwa.}"
+    pwa-stop "$project" --store "$store" 2>/dev/null || true
+done
+[[ -f "${APACHE_ROOT}/${project}/.pwa" ]] && { pwa-stop "$project" 2>/dev/null || true; }
+STOPALL
+
+            echo "[clean] Removing project folder (the shared database is never touched)..."
+            docker exec -i "$web_container" bash -s -- "$name" << 'REMOVE'
+APACHE_ROOT="${M2D_APACHE_ROOT_DIRECTORY:-/var/www/html}"
+project="$1"
+rm -rf "${APACHE_ROOT:?}/${project:?}"
+REMOVE
+            echo "[clean] Removed '${name}'."
+        else
+            echo "[clean] Skipped '${name}'."
+        fi
+    done
+}
+
+function _m2d_clean_nudge ()
+{
+    # One-line, non-blocking notice — never prompts. Full review is `bin/m2d clean`.
+    local env_file="$1"
+    local threshold; threshold=$(_m2d_env_get_parameter "$env_file" M2D_STALE_PROJECT_DAYS 30)
+
+    local raw
+    raw=$(_m2d_clean_discover "$env_file") || return 0
+    [[ -z "$raw" ]] && return 0
+
+    local count=0 age
+    while IFS=: read -r _ age _ _; do
+        [[ -z "$age" ]] && continue
+        (( age >= threshold )) && count=$((count + 1))
+    done <<< "$raw"
+
+    (( count > 0 )) && echo "Note: ${count} install(s) are older than ${threshold} days. Run \`./bin/m2d clean\` to review."
 }
 
 function _m2d_display_help_set ()
@@ -874,10 +1036,12 @@ case $1 in
                     docker-compose --project-directory "$M2D_PROJECT_PATH" up -d --build
                 fi
                 _m2d_sync start "$M2D_ENV_FILE" "$M2D_PROJECT_PATH"
+                _m2d_clean_nudge "$M2D_ENV_FILE"
                 ;;
             *)
                 docker-compose  --project-directory "$M2D_PROJECT_PATH" up -d
                 _m2d_sync start "$M2D_ENV_FILE" "$M2D_PROJECT_PATH"
+                _m2d_clean_nudge "$M2D_ENV_FILE"
                 ;;
         esac
         ;;
@@ -971,6 +1135,20 @@ case $1 in
 
     'urls')
         _m2d_urls "$M2D_ENV_FILE"
+        ;;
+
+    'clean')
+        case $2 in
+            '-h'|'--help')
+                _m2d_display_help_clean
+                ;;
+            '--dry-run')
+                _m2d_clean "$M2D_ENV_FILE" 1
+                ;;
+            *)
+                _m2d_clean "$M2D_ENV_FILE" 0
+                ;;
+        esac
         ;;
 
     *)

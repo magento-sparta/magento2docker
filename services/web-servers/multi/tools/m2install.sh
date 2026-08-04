@@ -160,6 +160,9 @@ if [[ $_M2INSTALL_EXIT -eq 0 ]]; then
         echo "M2D_PHP_VERSION=${PHP_VERSION}"
         [[ -n "$EXPLICIT_ES_HOST" ]] && echo "M2D_SEARCH_ENGINE_HOST=${EXPLICIT_ES_HOST}"
         [[ -n "$EXPLICIT_ES_PORT" ]] && echo "M2D_SEARCH_ENGINE_PORT=${EXPLICIT_ES_PORT}"
+        # Precise install-completion timestamp for `bin/m2d clean`'s stale-project detection.
+        # Projects installed without this wrapper (the `apache` variant) fall back to folder mtime.
+        echo "M2D_INSTALLED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     } >> .m2install.conf
     echo "[m2install] Written post-install metadata to .m2install.conf"
 fi
