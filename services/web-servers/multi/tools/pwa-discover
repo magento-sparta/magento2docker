@@ -59,6 +59,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+pwa_validate_code "project" "$PROJECT"
+
 SCAN_PATH=$(realpath "$SCAN_PATH" 2>/dev/null || echo "$SCAN_PATH")
 [[ $PORCELAIN -eq 0 ]] && echo "[pwa-discover] scanning: $SCAN_PATH (depth: $DEPTH)"
 
@@ -109,6 +111,14 @@ process_entry() {
     local dp="$PROJECT"
     if [[ -z "$dp" && "$pwa_dir" == "${APACHE_ROOT}/"* ]]; then
         dp=$(echo "$pwa_dir" | sed "s|^${APACHE_ROOT}/||" | cut -d'/' -f1)
+    fi
+    # A soft check, not pwa_validate_code's hard exit: this runs once per discovered
+    # entry during a scan, and one oddly-named directory shouldn't abort the whole
+    # discovery run. Treat an unsafe name as unknown — the existing "project unknown"
+    # handling below already deals with that gracefully.
+    if [[ -n "$dp" && ! "$dp" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        echo "[pwa-discover] skipping entry: unsafe directory name '${dp}'" >&2
+        dp=""
     fi
 
     # Deduplicate by (project, store_code)

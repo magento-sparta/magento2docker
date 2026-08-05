@@ -51,6 +51,7 @@ if [[ -z "$PROJECT" ]]; then
         usage 1
     fi
 fi
+pwa_validate_code "project" "$PROJECT"; pwa_validate_code "store" "$STORE_CODE"
 
 MAGENTO_ROOT="${APACHE_ROOT}/${PROJECT}"
 

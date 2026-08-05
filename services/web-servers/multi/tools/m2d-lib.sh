@@ -92,12 +92,27 @@ run_as_magento() {
     fi
 }
 
+# ── pwa_validate_code LABEL VALUE ────────────────────────────────────────────
+# Exits the CALLING SCRIPT (not just this function) if VALUE is non-empty and isn't a
+# safe path component. Project/store codes come from user input or Cloud store-view
+# data and must never be able to smuggle `../` (or similar) into a path — every tool
+# that accepts a project or store argument must call this once, right after parsing
+# its arguments and before building any path from them.
+pwa_validate_code() {
+    local label="$1" value="$2"
+    [[ -z "$value" ]] && return 0
+    [[ "$value" =~ ^[a-zA-Z0-9_-]+$ ]] && return 0
+    echo "Error: ${label} '${value}' contains characters that aren't allowed (use only letters, digits, - and _)." >&2
+    exit 1
+}
+
 # ── PWA multi-store helpers ────────────────────────────────────────────────────
 
 # pwa_meta_file APACHE_ROOT PROJECT [STORE_CODE]
 # Returns path to .pwa (default store) or .pwa.<store> (named store).
 pwa_meta_file() {
     local root="$1" project="$2" store="${3:-}"
+    pwa_validate_code "project" "$project"; pwa_validate_code "store" "$store"
     [[ -n "$store" ]] && echo "${root}/${project}/.pwa.${store}" || echo "${root}/${project}/.pwa"
 }
 
@@ -106,6 +121,7 @@ pwa_meta_file() {
 # Default store: "<project>"   Named store: "<project>-<store>"
 pwa_run_key() {
     local project="$1" store="${2:-}"
+    pwa_validate_code "project" "$project"; pwa_validate_code "store" "$store"
     [[ -n "$store" ]] && echo "${project}-${store}" || echo "${project}"
 }
 
@@ -113,6 +129,7 @@ pwa_run_key() {
 # Default PWA directory.  Default: "<project>/pwa"  Named: "<project>/pwa-<store>"
 pwa_default_dir() {
     local root="$1" project="$2" store="${3:-}"
+    pwa_validate_code "project" "$project"; pwa_validate_code "store" "$store"
     [[ -n "$store" ]] && echo "${root}/${project}/pwa-${store}" || echo "${root}/${project}/pwa"
 }
 
@@ -120,4 +137,26 @@ pwa_default_dir() {
 # Returns https://pwa-<run_key>.<phpver>.127.0.0.1.nip.io/
 pwa_dev_url() {
     echo "https://pwa-${1}.${2}.127.0.0.1.nip.io/"
+}
+
+# ── ensure_fpm_pool VERSION ───────────────────────────────────────────────────
+# Starts the php-fpm<VERSION> pool (e.g. "8.3") if it isn't already running, and does
+# nothing if it is or if that version isn't installed in this image. Used both by
+# start.sh's boot-time scan of already-installed projects and by m2install.sh right
+# after a fresh install — a version with no other installed project has no running
+# pool until something starts one on demand, and nothing else currently does.
+ensure_fpm_pool() {
+    local version="$1"
+    local bin="php-fpm${version}"
+    local conf="/etc/php/${version}/fpm/php-fpm.conf"
+    command -v "$bin" &>/dev/null || return 0
+    # PHP-FPM's process title is always "php-fpm: master process (<config>)" regardless of
+    # the version-suffixed binary name that started it — the config path is what disambiguates
+    # which version's pool a given master process actually is. Parens are escaped because
+    # pgrep -f matches an extended regex, where unescaped ( ) are grouping metacharacters,
+    # not literal characters — unescaped, this check silently never matches (verified live).
+    pgrep -f "master process \\(${conf}\\)" &>/dev/null && return 0
+    "$bin" --daemonize --fpm-config "$conf" \
+        && echo "[m2d-lib] php-fpm${version} started" \
+        || echo "[m2d-lib] failed to start php-fpm${version}" >&2
 }

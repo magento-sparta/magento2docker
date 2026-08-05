@@ -104,6 +104,19 @@ Assume you have a multi-website Magento setup in the m246 folder; your domains c
 - http://website2.m246.127.0.0.1.nip.io
 All the above will point to /var/www/html/m246 in your container.
 
+#### Domains (`multi` web server variant)
+
+**The above applies to the `apache` (single-PHP) web server variant only.** Setting
+`M2D_WEB_SERVER_VENDOR='multi'` changes what the same two-segment hostname shape means:
+
+`http://{LEVEL_1}.{PHP_VERSION}.127.0.0.1.nip.io`
+
+Here LEVEL_1 is still the folder inside `/var/www/html`, but the **second** label selects a
+PHP version (e.g. `php81`) to serve that project with, not a nested/decorative site — e.g.
+`http://24dev.php81.127.0.0.1.nip.io`. **Nested-folder support (mirroring an existing Sparta
+site's `{account}/{site}` URL path) does not exist in the `multi` variant at all.** If you
+rely on that, stay on the `apache` variant, or flatten the folder first.
+
 
 ## Usage
 To work with Magento2Docker you can use `m2d` CLI command located in `bin` of Magento2Docker project.

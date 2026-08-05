@@ -48,6 +48,7 @@ services:
       args:
         - M2D_DB_ENGINE_VENDOR=${M2D_DB_ENGINE_VENDOR:-mariadb}
         - M2D_DB_ENGINE_VERSION=${M2D_DB_ENGINE_VERSION:-10}
+        - M2D_ENABLE_DB_REPLICATION=${M2D_ENABLE_DB_REPLICATION:-no}
     container_name: "m2d-db${M2D_PROJECT_SUFFIX:-}"
     restart: unless-stopped
     environment:
@@ -71,54 +72,58 @@ services:
         max-size: "10m"
         max-file: "3"
 
-#  db_slave:
-#    build:
-#      context: .
-#      dockerfile: services/db-engines/Dockerfile
-#      target: m2d_db_slave_engine
-#      args:
-#        - M2D_DB_ENGINE_VENDOR=${M2D_DB_ENGINE_VENDOR:-mariadb}
-#        - M2D_DB_ENGINE_VERSION=${M2D_DB_ENGINE_VERSION:-10}
-#    container_name: "m2d-db-slave${M2D_PROJECT_SUFFIX:-}"
-#    restart: unless-stopped
-#    environment:
-#      MYSQL_DATABASE: magento
-#      MYSQL_ALLOW_EMPTY_PASSWORD: 1
-#      MYSQL_USER: magento
-#      MYSQL_PASSWORD: magento
-#    ports:
-#      - "${M2D_PORT_FOR_DB_SLAVE_ENGINE:-3307}:3306"
-#    volumes:
-#      - db-slave-volume:/var/lib/mysql
-#    depends_on:
-#      db:
-#        condition: service_healthy
-#    logging:
-#      driver: "json-file"
-#      options:
-#        max-size: "10m"
-#        max-file: "3"
+  db_slave:
+    build:
+      context: .
+      dockerfile: services/db-engines/Dockerfile
+      target: m2d_db_slave_engine
+      args:
+        - M2D_DB_ENGINE_VENDOR=${M2D_DB_ENGINE_VENDOR:-mariadb}
+        - M2D_DB_ENGINE_VERSION=${M2D_DB_ENGINE_VERSION:-10}
+        - M2D_ENABLE_DB_REPLICATION=${M2D_ENABLE_DB_REPLICATION:-no}
+    container_name: "m2d-db-slave${M2D_PROJECT_SUFFIX:-}"
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: magento
+      MYSQL_ALLOW_EMPTY_PASSWORD: 1
+      MYSQL_USER: magento
+      MYSQL_PASSWORD: magento
+    ports:
+      - "${M2D_PORT_FOR_DB_SLAVE_ENGINE:-3307}:3306"
+    volumes:
+      - db-slave-volume:/var/lib/mysql
+    depends_on:
+      db:
+        condition: service_healthy
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
-#  db_monitor:
-#    build:
-#      context: .
-#      dockerfile: services/db-monitor/Dockerfile
-#    container_name: "m2d-db-monitor${M2D_PROJECT_SUFFIX:-}"
-#    restart: unless-stopped
-#    environment:
-#      - M2D_DB_MONITOR_INTERVAL=${M2D_DB_MONITOR_INTERVAL:-5}
-#    ports:
-#      - "${M2D_PORT_FOR_DB_MONITOR:-8099}:8080"
-#    depends_on:
-#      db:
-#        condition: service_healthy
-#      db_slave:
-#        condition: service_started
-#    logging:
-#      driver: "json-file"
-#      options:
-#        max-size: "2m"
-#        max-file: "3"
+  db_monitor:
+    build:
+      context: .
+      dockerfile: services/db-monitor/Dockerfile
+      target: m2d_db_monitor
+      args:
+        - M2D_ENABLE_DB_REPLICATION=${M2D_ENABLE_DB_REPLICATION:-no}
+    container_name: "m2d-db-monitor${M2D_PROJECT_SUFFIX:-}"
+    restart: unless-stopped
+    environment:
+      - M2D_DB_MONITOR_INTERVAL=${M2D_DB_MONITOR_INTERVAL:-5}
+    ports:
+      - "${M2D_PORT_FOR_DB_MONITOR:-8099}:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+      db_slave:
+        condition: service_started
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "2m"
+        max-file: "3"
 
   search_engine_es7:
     build:

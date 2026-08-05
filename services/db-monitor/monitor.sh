@@ -12,9 +12,19 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
 }
 
+# html_escape TEXT — MySQL error text (Last_IO_Error/Last_SQL_Error) can echo back
+# data influenced by replicated statements, and this dashboard is served with no
+# auth — escape before it ever reaches write_html's here-doc.
+html_escape() {
+    printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'
+}
+
 write_html() {
-    local master_level="$1" master_line="$2"
-    local slave_level="$3"  slave_line="$4"
+    local master_level="$1" master_line_raw="$2"
+    local slave_level="$3"  slave_line_raw="$4"
+    local master_line slave_line
+    master_line=$(html_escape "$master_line_raw")
+    slave_line=$(html_escape "$slave_line_raw")
 
     color() {
         case "$1" in

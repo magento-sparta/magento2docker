@@ -59,6 +59,7 @@ if [[ -z "$PROJECT" && "$PWD" == "${APACHE_ROOT}/"* ]]; then
     fi
     [[ $_has_pwa -eq 1 ]] && PROJECT="$_candidate" || true
 fi
+pwa_validate_code "project" "$PROJECT"; pwa_validate_code "store" "$FILTER_STORE"
 
 # ── Per-store status ──────────────────────────────────────────────────────────
 

@@ -1,6 +1,8 @@
 #!/bin/bash
 set -e
 
+source /usr/local/bin/m2d-lib.sh
+
 DEFAULT_PHP="${M2D_WEB_SERVER_PHP_VERSION:-8.3}"
 
 # Expose variables to Apache vhost config
@@ -17,16 +19,17 @@ touch /usr/local/etc/pwa-ports.map
 chown magento:magento /usr/local/etc/pwa-ports.map /var/log/pwa /var/run/pwa 2>/dev/null || true
 chmod 664 /usr/local/etc/pwa-ports.map 2>/dev/null || true
 
-# Start a PHP-FPM pool for every installed version
+# Start a PHP-FPM pool for the default version, plus whatever versions the projects
+# already installed in this container actually use — not every version unconditionally.
+# Warming a pool nothing has installed just burns RAM/CPU for the life of the container;
+# a version a NEW install picks that isn't started yet is handled separately by
+# m2install.sh's own ensure_fpm_pool call right after a successful install.
 mkdir -p /run/php
-for ver in 8.1 8.2 8.3 8.4 8.5; do
-    bin="php-fpm${ver}"
-    if command -v "$bin" &>/dev/null; then
-        "$bin" --daemonize --fpm-config "/etc/php/${ver}/fpm/php-fpm.conf"
-        echo "[start.sh] php-fpm${ver} started"
-    else
-        echo "[start.sh] php-fpm${ver} not found, skipping"
-    fi
+ensure_fpm_pool "$DEFAULT_PHP"
+for conf in "$APACHE_ROOT"/*/.m2install.conf; do
+    [[ -f "$conf" ]] || continue
+    ver=$(grep -m1 '^M2D_PHP_VERSION=' "$conf" | cut -d= -f2-)
+    [[ -n "$ver" ]] && ensure_fpm_pool "$ver"
 done
 
 service ssh start

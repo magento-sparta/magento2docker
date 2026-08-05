@@ -116,12 +116,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Flag fragments forwarded to subcommands
-_PHP_FLAG=""
-[[ -n "$PHP_VER" ]]    && _PHP_FLAG="--php ${PHP_VER}"
-_STORE_FLAG=""
-[[ -n "$STORE_CODE" ]] && _STORE_FLAG="--store ${STORE_CODE}"
-
 # ── Project detection ─────────────────────────────────────────────────────────
 
 [[ -z "$PROJECT" && "$PWD" == "${APACHE_ROOT}/"* ]] && \
@@ -138,6 +132,14 @@ if [[ -z "$PROJECT" ]]; then
     read -r -p "  ${CYN}?${R} Project name: " PROJECT
     [[ -z "$PROJECT" ]] && { echo "Error: project name required"; exit 1; }
 fi
+pwa_validate_code "project" "$PROJECT"; pwa_validate_code "store" "$STORE_CODE"
+
+# Flag fragments forwarded to subcommands — built only after validation, so nothing
+# unvalidated is ever assembled into a forwarded argument.
+_PHP_FLAG=""
+[[ -n "$PHP_VER" ]]    && _PHP_FLAG="--php ${PHP_VER}"
+_STORE_FLAG=""
+[[ -n "$STORE_CODE" ]] && _STORE_FLAG="--store ${STORE_CODE}"
 
 MAGENTO_ROOT="${APACHE_ROOT}/${PROJECT}"
 [[ -d "$MAGENTO_ROOT" ]] || { echo "Error: not found: $MAGENTO_ROOT"; exit 1; }

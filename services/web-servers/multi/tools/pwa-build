@@ -71,6 +71,7 @@ if [[ -z "$PROJECT" ]]; then
         usage 1
     fi
 fi
+pwa_validate_code "project" "$PROJECT"; pwa_validate_code "store" "$STORE_CODE"
 
 MAGENTO_ROOT="${APACHE_ROOT}/${PROJECT}"
 
@@ -263,8 +264,23 @@ run_as_magento "$PHP_BIN" bin/magento cache:flush
 
 if [[ -z "$STORE_CODE" ]]; then
     if [[ -n "$_env_backend" && -f "${MAGENTO_ROOT}/.htaccess" ]]; then
+        # Apache's SetEnv takes exactly one value token — embedded whitespace would silently
+        # truncate at the first space, not error, so reject it outright rather than write
+        # something that looks fine here but is silently wrong at request time.
+        if [[ "$_env_backend" =~ [[:space:]] ]]; then
+            echo "[pwa-build] Error: MAGENTO_BACKEND_URL contains whitespace, which Apache's" >&2
+            echo "  SetEnv can't represent as a single value: '${_env_backend}'" >&2
+            exit 1
+        fi
         sed -i '/^SetEnv MAGENTO_BACKEND_URL /d' "${MAGENTO_ROOT}/.htaccess"
-        sed -i "1s|^|SetEnv MAGENTO_BACKEND_URL ${_env_backend}\n\n|" "${MAGENTO_ROOT}/.htaccess"
+        # A '|'-delimited sed breaks (or silently corrupts .htaccess) if the URL itself
+        # contains a '|'; escape backslash/ampersand in the value (sed replacement
+        # metacharacters) and use a delimiter (\x01) that can't appear in a URL at all,
+        # instead of assuming '|' never will. Verified against literal '|', '&', and '\' in
+        # the URL.
+        _escaped_backend=$(printf '%s' "$_env_backend" | sed 's/[\&]/\\&/g')
+        _delim=$'\x01'
+        sed -i "1s${_delim}^${_delim}SetEnv MAGENTO_BACKEND_URL ${_escaped_backend}\n\n${_delim}" "${MAGENTO_ROOT}/.htaccess"
         echo "[pwa-build] SetEnv MAGENTO_BACKEND_URL written to .htaccess: $_env_backend"
     fi
 fi

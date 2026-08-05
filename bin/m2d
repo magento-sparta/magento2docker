@@ -137,18 +137,25 @@ function _m2d_urls ()
     https_port=$(_m2d_env_get_parameter "$env_file" M2D_PORT_FOR_WEB_SERVER_HTTPS 443)
     ssh_port=$(_m2d_env_get_parameter   "$env_file" M2D_PORT_FOR_WEB_SERVER_SSH   2222)
 
-    local db_port db_slave_port db_monitor_port db_vendor db_version
+    local db_port db_slave_port db_monitor_port db_vendor db_version db_repl_enabled
     db_port=$(_m2d_env_get_parameter       "$env_file" M2D_PORT_FOR_DB_ENGINE       3306)
     db_slave_port=$(_m2d_env_get_parameter "$env_file" M2D_PORT_FOR_DB_SLAVE_ENGINE 3307)
     db_monitor_port=$(_m2d_env_get_parameter "$env_file" M2D_PORT_FOR_DB_MONITOR    8099)
     db_vendor=$(_m2d_env_get_parameter     "$env_file" M2D_DB_ENGINE_VENDOR         mariadb)
     db_version=$(_m2d_env_get_parameter    "$env_file" M2D_DB_ENGINE_VERSION        10)
+    db_repl_enabled=$(_m2d_env_get_parameter "$env_file" M2D_ENABLE_DB_REPLICATION  no)
 
-    local search_port search_vendor search_version search_enabled
-    search_port=$(_m2d_env_get_parameter    "$env_file" M2D_PORT_FOR_SEARCH_ENGINE   9200)
-    search_vendor=$(_m2d_env_get_parameter  "$env_file" M2D_SEARCH_ENGINE_VENDOR     elasticsearch)
-    search_version=$(_m2d_env_get_parameter "$env_file" M2D_SEARCH_ENGINE_VERSION    7)
-    search_enabled=$(_m2d_env_get_parameter "$env_file" M2D_ENABLE_SEARCH_ENGINE     yes)
+    local es7_port es7_version es7_enabled es8_port es8_version es8_enabled
+    local os_port os_version os_enabled
+    es7_port=$(_m2d_env_get_parameter    "$env_file" M2D_PORT_FOR_ES7 9207)
+    es7_version=$(_m2d_env_get_parameter "$env_file" M2D_ES7_VERSION  7)
+    es7_enabled=$(_m2d_env_get_parameter "$env_file" M2D_ENABLE_ES7   yes)
+    es8_port=$(_m2d_env_get_parameter    "$env_file" M2D_PORT_FOR_ES8 9208)
+    es8_version=$(_m2d_env_get_parameter "$env_file" M2D_ES8_VERSION  8)
+    es8_enabled=$(_m2d_env_get_parameter "$env_file" M2D_ENABLE_ES8   no)
+    os_port=$(_m2d_env_get_parameter     "$env_file" M2D_PORT_FOR_OPENSEARCH 9200)
+    os_version=$(_m2d_env_get_parameter  "$env_file" M2D_OPENSEARCH_VERSION  2)
+    os_enabled=$(_m2d_env_get_parameter  "$env_file" M2D_ENABLE_OPENSEARCH   no)
 
     local broker_port broker_amqp_port broker_vendor broker_version broker_enabled
     broker_port=$(_m2d_env_get_parameter      "$env_file" M2D_PORT_FOR_MESSAGE_BROKER      15672)
@@ -182,11 +189,17 @@ function _m2d_urls ()
     _p "web"        "https://localhost:${https_port}   http://localhost:${http_port}"
     _p "ssh"        "ssh magento@localhost -p ${ssh_port}"
     _p "database"   "mysql://localhost:${db_port}   ${DIM}db:magento  user:magento  pass:magento  [${db_vendor} ${db_version}]${RESET}"
-    _p "db replica" "mysql://localhost:${db_slave_port}"
-    _p "db monitor" "http://localhost:${db_monitor_port}"
 
-    local s_flag; s_flag=$(_flag "$search_enabled")
-    _p "search"     "http://localhost:${search_port}   ${DIM}[${search_vendor} ${search_version}]${RESET}${s_flag}"
+    local dr_flag; dr_flag=$(_flag "$db_repl_enabled")
+    _p "db replica" "mysql://localhost:${db_slave_port}${dr_flag}"
+    _p "db monitor" "http://localhost:${db_monitor_port}${dr_flag}"
+
+    local es7_flag; es7_flag=$(_flag "$es7_enabled")
+    _p "search es7" "http://localhost:${es7_port}   ${DIM}[elasticsearch ${es7_version}]${RESET}${es7_flag}"
+    local es8_flag; es8_flag=$(_flag "$es8_enabled")
+    _p "search es8" "http://localhost:${es8_port}   ${DIM}[elasticsearch ${es8_version}]${RESET}${es8_flag}"
+    local os_flag; os_flag=$(_flag "$os_enabled")
+    _p "opensearch" "http://localhost:${os_port}   ${DIM}[opensearch ${os_version}]${RESET}${os_flag}"
 
     local r_flag; r_flag=$(_flag "$redis_enabled")
     _p "db cache"   "redis://localhost:${redis_port}   ${DIM}[${redis_vendor} ${redis_version}]${RESET}${r_flag}"
@@ -537,6 +550,7 @@ Options:
 Commands:
   blackfire       $Command blackfire container
   db-cache        $Command db-cache container
+  db-replication  $Command DB replica + monitor dashboard (db_slave / db_monitor)
   elastic         Alias for 'search-engine ' command
   m               Alias for 'mailcatcher' command
   mailcatcher     $Command mailcatcher container
@@ -726,7 +740,13 @@ function _m2d_env_get_parameter ()
     local default="${3:-}"
 
     if [[ ! -f "$env_file" ]]; then
-        echo "Env file '$env_file' doesn't exist! Initialize it by executing \`./bin/m2d setup env\`"
+        # Every caller does value=$(_m2d_env_get_parameter ...) — stdout becomes the
+        # value. This message must go to stderr, or it gets captured as the parameter's
+        # value instead of shown as an error, garbling every line that reads a setting
+        # (most visibly `urls`, which calls this ~15 times). Still return the default on
+        # stdout so callers get a sane fallback instead of nothing.
+        echo "Env file '$env_file' doesn't exist! Initialize it by executing \`./bin/m2d setup env\`" >&2
+        echo "$default"
         return 1
     fi
 
@@ -982,6 +1002,9 @@ case $1 in
             'db-cache'|'redis')
                 _m2d_env_set_parameter "$M2D_ENV_FILE" M2D_ENABLE_DB_CACHE yes
                 ;;
+            'db-replication'|'replication')
+                _m2d_env_set_parameter "$M2D_ENV_FILE" M2D_ENABLE_DB_REPLICATION yes
+                ;;
             'message-broker'|'rabbit'|'activemq')
                 _m2d_env_set_parameter "$M2D_ENV_FILE" M2D_ENABLE_MESSAGE_BROKER yes
                 ;;
@@ -1010,6 +1033,9 @@ case $1 in
                 ;;
             'db-cache'|'redis')
                 _m2d_env_set_parameter "$M2D_ENV_FILE" M2D_ENABLE_DB_CACHE no
+                ;;
+            'db-replication'|'replication')
+                _m2d_env_set_parameter "$M2D_ENV_FILE" M2D_ENABLE_DB_REPLICATION no
                 ;;
             'message-broker'|'rabbit'|'activemq')
                 _m2d_env_set_parameter "$M2D_ENV_FILE" M2D_ENABLE_MESSAGE_BROKER no
@@ -1134,7 +1160,14 @@ case $1 in
         ;;
 
     'urls')
-        _m2d_urls "$M2D_ENV_FILE"
+        case $2 in
+            '-h'|'--help')
+                _m2d_display_help_commad_generic "urls"
+                ;;
+            *)
+                _m2d_urls "$M2D_ENV_FILE"
+                ;;
+        esac
         ;;
 
     'clean')

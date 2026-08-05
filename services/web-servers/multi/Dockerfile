@@ -6,7 +6,7 @@ ARG PHP_VERSIONS='8.1 8.2 8.3 8.4 8.5'
 
 ## MINICA CERTIFICATE BUILDER ##
 FROM golang:1.22-bullseye AS minica_builder
-RUN go install github.com/jsha/minica@latest
+RUN go install github.com/jsha/minica@v1.1.0
 RUN mkdir /certs && cd /certs && minica --domains '*.127.0.0.1.nip.io,*.php81.127.0.0.1.nip.io,*.php82.127.0.0.1.nip.io,*.php83.127.0.0.1.nip.io,*.php84.127.0.0.1.nip.io,*.php85.127.0.0.1.nip.io'
 
 ## BASE IMAGE - ALL PHP VERSIONS ##
@@ -70,7 +70,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         vim \
         wget \
         zlib1g-dev \
-    && apt-get clean all
+    && apt-get clean all \
+    && rm -rf /var/lib/apt/lists/*
 
 # ondrej/php PPA:
 RUN curl -sSL https://packages.sury.org/php/apt.gpg \
@@ -90,6 +91,8 @@ RUN echo "ext-cache:${CACHEBUST_PHP_EXT}" && for ver in $PHP_VERSIONS; do \
     done \
     && apt-get install -y --no-install-recommends php-pear \
     && apt-get clean all
+    # NOTE: apt lists are intentionally NOT removed here — the next RUN (XDEBUG) installs
+    # more packages without its own `apt-get update` and depends on these lists surviving.
 
 # XDEBUG PER VERSION (enabled by default, warnings suppressed):
 RUN for ver in $PHP_VERSIONS; do \
@@ -108,36 +111,6 @@ RUN for ver in $PHP_VERSIONS; do \
         echo "memory_limit = ${M2D_WEB_SERVER_PHP_MEMORY_LIMIT}" \
             > /etc/php/${ver}/fpm/conf.d/99-memory-limit.ini; \
     done
-
-# PHP CONFIG FILES (prepend + custom ini):
-COPY ./services/web-servers/apache/etc/php/.prepend.php    /usr/local/lib/php/.prepend.php
-COPY ./services/web-servers/apache/etc/php/custom.ini     /usr/local/lib/php/custom.ini
-COPY ./services/web-servers/apache/etc/php/mailcatcher.ini /usr/local/lib/php/mailcatcher.ini
-COPY ./services/web-servers/apache/etc/php/newrelic-stub   /usr/local/src/newrelic-stub
-RUN for ver in $PHP_VERSIONS; do \
-        cp /usr/local/lib/php/custom.ini /etc/php/${ver}/fpm/conf.d/99-custom.ini; \
-        cp /usr/local/lib/php/custom.ini /etc/php/${ver}/cli/conf.d/99-custom.ini; \
-        echo "auto_prepend_file = /usr/local/lib/php/.prepend.php" \
-            > /etc/php/${ver}/cli/conf.d/99-prepend.ini; \
-        echo "auto_prepend_file = /usr/local/lib/php/.prepend.php" \
-            > /etc/php/${ver}/fpm/conf.d/99-prepend.ini; \
-    done
-
-# NEWRELIC MOCK EXTENSION:
-RUN for ver in $PHP_VERSIONS; do \
-        apt-get install -y --no-install-recommends php${ver}-dev 2>/dev/null || { echo "WARN: php${ver}-dev unavailable, skipping newrelic mock"; continue; }; \
-        cp -r /usr/local/src/newrelic-stub "/tmp/newrelic-build-${ver}" \
-        && cd "/tmp/newrelic-build-${ver}" \
-        && phpize${ver} \
-        && ./configure --with-php-config=php-config${ver} \
-        && make \
-        && make install \
-        && echo "extension=newrelic.so" > "/etc/php/${ver}/fpm/conf.d/20-newrelic.ini" \
-        && echo "extension=newrelic.so" > "/etc/php/${ver}/cli/conf.d/20-newrelic.ini" \
-        || echo "WARN: newrelic mock build failed for PHP ${ver}"; \
-        cd / && rm -rf "/tmp/newrelic-build-${ver}"; \
-    done \
-    && apt-get clean all
 
 # FPM POOL — EACH VERSION GETS ITS OWN UNIX SOCKET:
 RUN for ver in $PHP_VERSIONS; do \
@@ -176,6 +149,40 @@ RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local
     && mkdir -p ${_HOME_DIRECTORY}/.composer \
     && curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer2 --2 \
     && ln -s /usr/local/bin/composer2 /usr/local/bin/composer
+
+# PHP CONFIG FILES (prepend + custom ini):
+# Placed after Node/Composer (not with the rest of the per-version PHP setup above) so that
+# iterating on the still-evolving New Relic mock extension doesn't invalidate the Docker
+# cache for those slower, rarely-changing installs.
+COPY ./services/web-servers/apache/etc/php/.prepend.php    /usr/local/lib/php/.prepend.php
+COPY ./services/web-servers/apache/etc/php/custom.ini     /usr/local/lib/php/custom.ini
+COPY ./services/web-servers/apache/etc/php/mailcatcher.ini /usr/local/lib/php/mailcatcher.ini
+COPY ./services/web-servers/apache/etc/php/newrelic-stub   /usr/local/src/newrelic-stub
+RUN for ver in $PHP_VERSIONS; do \
+        cp /usr/local/lib/php/custom.ini /etc/php/${ver}/fpm/conf.d/99-custom.ini; \
+        cp /usr/local/lib/php/custom.ini /etc/php/${ver}/cli/conf.d/99-custom.ini; \
+        echo "auto_prepend_file = /usr/local/lib/php/.prepend.php" \
+            > /etc/php/${ver}/cli/conf.d/99-prepend.ini; \
+        echo "auto_prepend_file = /usr/local/lib/php/.prepend.php" \
+            > /etc/php/${ver}/fpm/conf.d/99-prepend.ini; \
+    done
+
+# NEWRELIC MOCK EXTENSION:
+RUN for ver in $PHP_VERSIONS; do \
+        apt-get install -y --no-install-recommends php${ver}-dev 2>/dev/null || { echo "WARN: php${ver}-dev unavailable, skipping newrelic mock"; continue; }; \
+        cp -r /usr/local/src/newrelic-stub "/tmp/newrelic-build-${ver}" \
+        && cd "/tmp/newrelic-build-${ver}" \
+        && phpize${ver} \
+        && ./configure --with-php-config=php-config${ver} \
+        && make \
+        && make install \
+        && echo "extension=newrelic.so" > "/etc/php/${ver}/fpm/conf.d/20-newrelic.ini" \
+        && echo "extension=newrelic.so" > "/etc/php/${ver}/cli/conf.d/20-newrelic.ini" \
+        || echo "WARN: newrelic mock build failed for PHP ${ver}"; \
+        cd / && rm -rf "/tmp/newrelic-build-${ver}"; \
+    done \
+    && apt-get clean all \
+    && rm -rf /var/lib/apt/lists/*
 
 # TOOLS:
 COPY ./services/web-servers/apache/tools/* /usr/local/bin/

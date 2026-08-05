@@ -56,6 +56,7 @@ if [[ -z "$PROJECT" ]]; then
         usage 1
     fi
 fi
+pwa_validate_code "project" "$PROJECT"; pwa_validate_code "store" "$STORE_CODE"
 
 detect_php "${APACHE_ROOT}/${PROJECT}"
 

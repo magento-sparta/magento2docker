@@ -94,6 +94,7 @@ if [[ -z "$PROJECT" && $ALL -eq 0 ]]; then
         exit 1
     fi
 fi
+pwa_validate_code "project" "$PROJECT"; pwa_validate_code "store" "$STORE_CODE"
 
 if [[ $ALL -eq 1 ]]; then
     found=0

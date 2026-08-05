@@ -4,7 +4,7 @@ ARG M2D_ENABLE_MAILCATCHER='no'
 
 ## MINICA CERTIFICATE BUILDER ##
 FROM golang:1.22-bullseye AS minica_builder
-RUN go install github.com/jsha/minica@latest
+RUN go install github.com/jsha/minica@v1.1.0
 RUN mkdir /certs && cd /certs && minica --domains '*.127.0.0.1.nip.io'
 
 ## BASE PHP IMAGE - COMMON FOR ALL PHP VERSIONS ##

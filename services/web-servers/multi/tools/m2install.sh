@@ -52,6 +52,11 @@ unset _prev _arg
 # ── Detect PHP version ────────────────────────────────────────────────────────
 source /usr/local/bin/m2d-lib.sh
 
+# Defensive, matching every pwa-* tool: PROJECT_NAME is derived from an existing directory
+# name here (lower risk than free user input), but validating it costs nothing and keeps
+# this consistent with the rest of the toolchain.
+pwa_validate_code "project" "$PROJECT_NAME"
+
 # Always run auto-detection first so .m2install.conf (written by a previous
 # successful install) can take priority over any --php injected by wrappers
 # like _call_m2install.  The explicit CLI flag is only honoured when the
@@ -165,6 +170,12 @@ if [[ $_M2INSTALL_EXIT -eq 0 ]]; then
         echo "M2D_INSTALLED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     } >> .m2install.conf
     echo "[m2install] Written post-install metadata to .m2install.conf"
+
+    # start.sh only warms pools for versions already installed at container boot — a
+    # version this project is the FIRST to use has no running pool until something starts
+    # one on demand. Ensure it here so the just-installed project is servable immediately,
+    # not just after the next container restart.
+    ensure_fpm_pool "$PHP_VERSION"
 fi
 
 exit $_M2INSTALL_EXIT
