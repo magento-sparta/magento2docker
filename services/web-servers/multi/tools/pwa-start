@@ -1,0 +1,181 @@
+#!/bin/bash
+# pwa-start — start the PWA Studio dev server for a project
+#
+# USAGE
+#   pwa-start [project] [options]
+#
+# OPTIONS
+#   --store CODE  Store view code for multi-store setups (e.g. en, fr).
+#                 Starts the dev server for that store.
+#                 Omit for single-store / default store.
+#   --port PORT   Force a specific dev-server port (default: auto-assigned
+#                 starting from 10001, incremented per project; reused on restart)
+#
+# DESCRIPTION
+#   Allocates (or reuses) a port for the dev server, registers it in the Apache
+#   RewriteMap, then starts the Node process in the background.
+#
+#   Run pwa-install first to scaffold the project and create the .env file.
+#   Project name is auto-detected when run from inside the project directory.
+#
+# ACCESS URLS
+#   Single store:  https://pwa-<project>.<phpver>.127.0.0.1.nip.io/
+#   Named store:   https://pwa-<project>-<store>.<phpver>.127.0.0.1.nip.io/
+
+set -e
+
+source /usr/local/bin/m2d-lib.sh
+
+APACHE_ROOT="${M2D_APACHE_ROOT_DIRECTORY:-/var/www/html}"
+PWA_BASE_PORT=10001
+
+usage() {
+    sed -n '2,/^set -e/p' "$0" | grep '^#' | sed 's/^# \?//'
+    exit "${1:-0}"
+}
+
+FORCE_PORT=""
+PROJECT=""
+STORE_CODE=""
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --store)   STORE_CODE="$2";   shift 2 ;;
+        --port)    FORCE_PORT="$2";   shift 2 ;;
+        -h|--help) usage 0 ;;
+        -*)        echo "Unknown option: $1"; usage 1 ;;
+        *)         PROJECT="$1"; shift ;;
+    esac
+done
+
+if [[ -z "$PROJECT" ]]; then
+    if [[ "$PWD" == "${APACHE_ROOT}/"* ]]; then
+        PROJECT=$(echo "$PWD" | sed "s|^${APACHE_ROOT}/||" | cut -d'/' -f1)
+    else
+        echo "Error: project name required (or run from inside the project directory)."
+        usage 1
+    fi
+fi
+pwa_validate_code "project" "$PROJECT"; pwa_validate_code "store" "$STORE_CODE"
+
+detect_php "${APACHE_ROOT}/${PROJECT}"
+
+RUN_KEY=$(pwa_run_key "$PROJECT" "$STORE_CODE")
+META_FILE=$(pwa_meta_file "$APACHE_ROOT" "$PROJECT" "$STORE_CODE")
+
+# ── Load project meta ─────────────────────────────────────────────────────────
+
+if [[ ! -f "$META_FILE" ]]; then
+    echo "[pwa-start] Error: no meta file for '${PROJECT}'${STORE_CODE:+ store '${STORE_CODE}'}."
+    echo "  Run: pwa-install ${PROJECT}${STORE_CODE:+ --store ${STORE_CODE}}"
+    exit 1
+fi
+
+PWA_DIR=$(grep "^PWA_DIR=" "$META_FILE" | cut -d= -f2-)
+
+# ── Sanity checks ─────────────────────────────────────────────────────────────
+
+if [[ ! -d "$PWA_DIR" ]]; then
+    echo "[pwa-start] Error: $PWA_DIR not found."
+    echo "  Run: pwa-install ${PROJECT}${STORE_CODE:+ --store ${STORE_CODE}}"
+    exit 1
+fi
+
+if [[ ! -d "${PWA_DIR}/node_modules" ]]; then
+    if [[ -f "${PWA_DIR}/upward.yml" && ! -f "${PWA_DIR}/package.json" ]]; then
+        echo "[pwa-start] Error: ${PROJECT}${STORE_CODE:+ store ${STORE_CODE}} is pre-built output — no Node dev server available."
+        echo "  Wire the existing upward.yml into Magento instead:"
+        echo "    pwa-build ${PROJECT}${STORE_CODE:+ --store ${STORE_CODE}} --prebuilt"
+    else
+        echo "[pwa-start] Error: node_modules not found in ${PWA_DIR}."
+        echo "  Run: pwa-install ${PROJECT}${STORE_CODE:+ --store ${STORE_CODE}}"
+    fi
+    exit 1
+fi
+
+# ── Port allocation ───────────────────────────────────────────────────────────
+# Reuse existing port (set by a previous pwa-start) so the Apache map entry
+# stays stable across restarts; allocate a new one on first run.
+
+existing_port=$(grep "^PWA_PORT=" "$META_FILE" 2>/dev/null | cut -d= -f2 || true)
+
+if [[ -n "$FORCE_PORT" ]]; then
+    PORT="$FORCE_PORT"
+elif [[ -n "$existing_port" ]]; then
+    PORT="$existing_port"
+else
+    # Find highest port across all .pwa and .pwa.* meta files
+    last_port=$(grep -h "^PWA_PORT=" "${APACHE_ROOT}"/*/.pwa "${APACHE_ROOT}"/*/.pwa.* 2>/dev/null \
+        | cut -d= -f2 | sort -n | tail -1 || true)
+    PORT=$(( ${last_port:-$((PWA_BASE_PORT - 1))} + 1 ))
+fi
+
+# Persist port in meta so restarts reuse the same one
+grep -v "^PWA_PORT=" "$META_FILE" > "${META_FILE}.tmp" && mv "${META_FILE}.tmp" "$META_FILE"
+echo "PWA_PORT=${PORT}" >> "$META_FILE"
+
+PWA_LOG_DIR="/var/log/pwa"
+PID_FILE="/var/run/pwa/${RUN_KEY}.pid"
+
+# ── Already running? ──────────────────────────────────────────────────────────
+
+if [[ -f "$PID_FILE" ]]; then
+    pid=$(cat "$PID_FILE")
+    if kill -0 "$pid" 2>/dev/null; then
+        DEV_URL=$(pwa_dev_url "$RUN_KEY" "$PHP_SEGMENT")
+        echo "[pwa-start] already running (pid $pid, port $PORT)"
+        echo "[pwa-start] ${DEV_URL}"
+        exit 0
+    else
+        rm -f "$PID_FILE"
+    fi
+fi
+
+# ── Register port in Apache RewriteMap ───────────────────────────────────────
+
+PWA_PORTS_MAP="/usr/local/etc/pwa-ports.map"
+mkdir -p /usr/local/etc
+touch "$PWA_PORTS_MAP"
+sed -i "/^${RUN_KEY} /d" "$PWA_PORTS_MAP" 2>/dev/null || true
+echo "${RUN_KEY} ${PORT}" >> "$PWA_PORTS_MAP"
+
+# ── Start dev server ──────────────────────────────────────────────────────────
+
+mkdir -p "$PWA_LOG_DIR"
+mkdir -p "$(dirname "$PID_FILE")"
+cd "$PWA_DIR"
+
+if grep -q '"watch"' package.json 2>/dev/null; then
+    WATCH_CMD="yarn watch"
+else
+    WATCH_CMD="yarn start"
+fi
+
+DEV_URL=$(pwa_dev_url "$RUN_KEY" "$PHP_SEGMENT")
+echo "[pwa-start] starting ${RUN_KEY} on port $PORT (cmd: $WATCH_CMD)"
+echo "[pwa-start] log: ${PWA_LOG_DIR}/${RUN_KEY}.log"
+
+# setsid creates a new process group (pgid = pid of the leader) so that
+# pwa-stop can kill the entire tree (su → bash → yarn → webpack) with
+# a single process-group signal rather than just the top-level process.
+if [[ "$(id -u)" -eq 0 ]] && id magento &>/dev/null; then
+    setsid su -s /bin/bash magento -c "cd '$PWA_DIR' && NODE_OPTIONS=--openssl-legacy-provider NODE_TLS_REJECT_UNAUTHORIZED=0 DEV_SERVER_PORT=$PORT $WATCH_CMD" \
+        > "${PWA_LOG_DIR}/${RUN_KEY}.log" 2>&1 &
+else
+    setsid bash -c "cd '$PWA_DIR' && NODE_OPTIONS=--openssl-legacy-provider NODE_TLS_REJECT_UNAUTHORIZED=0 DEV_SERVER_PORT=$PORT $WATCH_CMD" \
+        > "${PWA_LOG_DIR}/${RUN_KEY}.log" 2>&1 &
+fi
+
+_pid="$!"
+echo "$_pid" > "$PID_FILE"
+echo "[pwa-start] pid $_pid"
+
+apache2ctl graceful 2>/dev/null || true
+
+sleep 2
+if ! kill -0 "$_pid" 2>/dev/null; then
+    echo "[pwa-start] Warning: process exited immediately — check log:"
+    tail -5 "${PWA_LOG_DIR}/${RUN_KEY}.log" 2>/dev/null | sed 's/^/  /' || true
+else
+    echo "[pwa-start] ${DEV_URL}"
+fi

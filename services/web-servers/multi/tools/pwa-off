@@ -1,0 +1,134 @@
+#!/bin/bash
+# pwa-off — disable UPWARD-PHP and restore Luma as the active frontend
+#
+# USAGE
+#   pwa-off [project] [options]
+#
+# OPTIONS
+#   --store CODE    Store view code for multi-store setups (e.g. en, fr).
+#                   Clears web/upward/path at the store scope instead of default.
+#   --php VERSION   Override detected PHP version (e.g. --php 8.3)
+#
+# DESCRIPTION
+#   Clears web/upward/path config and flushes cache.
+#   Does NOT disable the module or run setup:upgrade — fast (~5 sec).
+#
+#   The built upward.yml is preserved on disk.
+#   Run pwa-on to re-enable without rebuilding.
+#   Project auto-detected when run from inside the project directory.
+
+set -e
+
+source /usr/local/bin/m2d-lib.sh
+
+APACHE_ROOT="${M2D_APACHE_ROOT_DIRECTORY:-/var/www/html}"
+
+usage() {
+    sed -n '2,/^set -e/p' "$0" | grep '^#' | sed 's/^# \?//'
+    exit "${1:-0}"
+}
+
+PROJECT=""
+STORE_CODE=""
+OVERRIDE_PHP=""
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --store)    STORE_CODE="$2";   shift 2 ;;
+        --php)      OVERRIDE_PHP="$2"; shift 2 ;;
+        -h|--help)  usage 0 ;;
+        -*)         echo "Unknown option: $1"; usage 1 ;;
+        *)          PROJECT="$1"; shift ;;
+    esac
+done
+
+if [[ -z "$PROJECT" ]]; then
+    if [[ "$PWD" == "${APACHE_ROOT}/"* ]]; then
+        PROJECT=$(echo "$PWD" | sed "s|^${APACHE_ROOT}/||" | cut -d'/' -f1)
+        echo "[pwa-off] detected project: $PROJECT"
+    else
+        echo "Error: project name required (or run from inside the project directory)."
+        usage 1
+    fi
+fi
+pwa_validate_code "project" "$PROJECT"; pwa_validate_code "store" "$STORE_CODE"
+
+MAGENTO_ROOT="${APACHE_ROOT}/${PROJECT}"
+
+# ── Load meta ─────────────────────────────────────────────────────────────────
+
+META_FILE=$(pwa_meta_file "$APACHE_ROOT" "$PROJECT" "$STORE_CODE")
+if [[ ! -f "$META_FILE" ]]; then
+    echo "[pwa-off] Error: no meta file for '${PROJECT}'${STORE_CODE:+ store '${STORE_CODE}'}."
+    echo "  Run pwa-build first."
+    exit 1
+fi
+
+if [[ ! -f "$MAGENTO_ROOT/bin/magento" ]]; then
+    echo "[pwa-off] Error: bin/magento not found at $MAGENTO_ROOT"
+    exit 1
+fi
+
+# ── PHP version ───────────────────────────────────────────────────────────────
+
+detect_php "$MAGENTO_ROOT"
+
+if [[ -n "$OVERRIDE_PHP" ]]; then
+    _ver="${OVERRIDE_PHP//./}"; _ver="${_ver#php}"
+    _candidate="/usr/local/bin/php${_ver}"
+    if [[ ! -x "$_candidate" ]]; then
+        echo "[pwa-off] Error: PHP binary not found: $_candidate"
+        exit 1
+    fi
+    PHP_BIN="$_candidate"
+    PHP_SEGMENT=$("$PHP_BIN" -r 'echo "php".PHP_MAJOR_VERSION.PHP_MINOR_VERSION;')
+    PHP_VERSION=$("$PHP_BIN" -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')
+fi
+
+echo "[pwa-off] project : $PROJECT${STORE_CODE:+  store: $STORE_CODE}"
+echo "[pwa-off] php     : $PHP_BIN ($PHP_VERSION)"
+
+# ── Already off? ──────────────────────────────────────────────────────────────
+
+if grep -q "^UPWARD_OFF=1" "$META_FILE" 2>/dev/null; then
+    echo "[pwa-off] already off — Luma is the active frontend"
+    echo "  Re-enable: pwa-on ${PROJECT}${STORE_CODE:+ --store ${STORE_CODE}}"
+    exit 0
+fi
+
+# ── config:delete web/upward/path ─────────────────────────────────────────────
+
+cd "$MAGENTO_ROOT"
+echo ""
+echo "[pwa-off] clearing web/upward/path..."
+if [[ -n "$STORE_CODE" ]]; then
+    run_as_magento "$PHP_BIN" bin/magento config:delete \
+        --scope=stores --scope-code="${STORE_CODE}" \
+        web/upward/path 2>/dev/null || true
+else
+    run_as_magento "$PHP_BIN" bin/magento config:delete web/upward/path 2>/dev/null || true
+fi
+
+# ── cache:flush ───────────────────────────────────────────────────────────────
+
+echo "[pwa-off] cache:flush..."
+run_as_magento "$PHP_BIN" bin/magento cache:flush
+
+# ── Update meta ───────────────────────────────────────────────────────────────
+# Save the upward.yml path under UPWARD_YML_SAVED so pwa-on can restore it
+# without needing a rebuild.
+
+_saved_yml=$(grep "^UPWARD_YML=" "$META_FILE" 2>/dev/null | cut -d= -f2- || true)
+sed -i '/^UPWARD_YML=/d'        "$META_FILE"
+sed -i '/^UPWARD_OFF=/d'        "$META_FILE"
+sed -i '/^UPWARD_YML_SAVED=/d'  "$META_FILE"
+echo "UPWARD_OFF=1" >> "$META_FILE"
+[[ -n "$_saved_yml" ]] && echo "UPWARD_YML_SAVED=${_saved_yml}" >> "$META_FILE"
+
+# ── Done ──────────────────────────────────────────────────────────────────────
+
+echo ""
+echo "[pwa-off] Done!"
+echo "  Luma active: https://${PROJECT}.${PHP_SEGMENT}.127.0.0.1.nip.io/${STORE_CODE:+${STORE_CODE}/}"
+echo ""
+echo "  Re-enable PWA: pwa-on ${PROJECT}${STORE_CODE:+ --store ${STORE_CODE}}"

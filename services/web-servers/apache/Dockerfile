@@ -2,6 +2,11 @@ ARG M2D_WEB_SERVER_PHP_VERSION='8.1'
 ARG M2D_ENABLE_BLACKFIRE='no'
 ARG M2D_ENABLE_MAILCATCHER='no'
 
+## MINICA CERTIFICATE BUILDER ##
+FROM golang:1.22-bullseye AS minica_builder
+RUN go install github.com/jsha/minica@v1.1.0
+RUN mkdir /certs && cd /certs && minica --domains '*.127.0.0.1.nip.io'
+
 ## BASE PHP IMAGE - COMMON FOR ALL PHP VERSIONS ##
 FROM php:${M2D_WEB_SERVER_PHP_VERSION}-apache-bullseye AS m2d_web_server_apache_php_base
 
@@ -19,6 +24,7 @@ RUN apt-get update \
         libxslt-dev \
         libicu-dev \
         mariadb-client \
+        bsdextrautils \
         pv \
         vim \
         nano \ 
@@ -58,9 +64,15 @@ RUN docker-php-ext-install -j$(nproc) iconv soap sockets \
 ARG M2D_WEB_SERVER_PHP_MEMORY_LIMIT='2G'
 ENV M2D_WEB_SERVER_PHP_MEMORY_LIMIT=${M2D_WEB_SERVER_PHP_MEMORY_LIMIT}
 COPY ./services/web-servers/apache/etc/php/* /usr/local/etc/php/conf.d/
+# The wildcard above doesn't match dotfiles (Docker COPY, like a shell glob,
+# excludes them) - copy .prepend.php explicitly so prepend.ini's
+# auto_prepend_file=/usr/local/etc/php/conf.d/prepend.php actually resolves.
+# Without this every php invocation (composer, pecl, xdebug, ...) fatals with
+# "Failed opening required '/usr/local/etc/php/conf.d/prepend.php'".
+COPY ./services/web-servers/apache/etc/php/.prepend.php /usr/local/etc/php/conf.d/prepend.php
 
 # NODEJS:
-RUN curl -sL https://deb.nodesource.com/setup_18.x | bash \
+RUN curl -sL https://deb.nodesource.com/setup_20.x | bash \
     && apt-get install -y nodejs
 
 RUN npm install --global yarn
@@ -90,6 +102,12 @@ RUN chmod -R 700 /root/.ssh \
     && touch /root/.ssh/known_hosts \
     && ssh-keygen -F github.com || ssh-keyscan github.com >> /root/.ssh/known_hosts
 
+# MINICA CERTIFICATES:
+RUN mkdir -p /etc/apache2/ssl
+COPY --from=minica_builder /certs/_.127.0.0.1.nip.io/cert.pem /etc/apache2/ssl/cert.pem
+COPY --from=minica_builder /certs/_.127.0.0.1.nip.io/key.pem  /etc/apache2/ssl/key.pem
+COPY --from=minica_builder /certs/minica.pem                   /etc/apache2/ssl/minica.pem
+
 # APACHE:
 RUN a2enmod ssl \
     && a2enmod headers \
@@ -115,7 +133,8 @@ RUN curl -o /usr/local/bin/n98-magerun2 https://files.magerun.net/n98-magerun2.p
 # ADOBE TOOLS (as root):
 ## Internally we are using m2install from sparta:
 RUN curl -o /usr/local/bin/m2install.sh https://raw.githubusercontent.com/magento-sparta/m2install/master/m2install.sh; \
-    curl -o /etc/bash_completion.d/m2install-bash-completion https://raw.githubusercontent.com/magento-sparta/m2install/master/m2install-bash-completion;
+    curl -o /etc/bash_completion.d/m2install-bash-completion https://raw.githubusercontent.com/magento-sparta/m2install/master/m2install-bash-completion; \
+    touch /usr/local/bin/m2install.csv && chown magento:magento /usr/local/bin/m2install.csv;
 
 # Install Percona Mydumper, it provides myloader utility used by m2install
 #RUN apt-get install -y libatomic1; \
@@ -162,7 +181,8 @@ COPY ./services/web-servers/apache/etc/composer/auth.json* ${_HOME_DIRECTORY}/.c
 COPY ./services/web-servers/apache/etc/m2install/.m2install.conf* ${_HOME_DIRECTORY}/
 
 # BASH COMPLETION:
-RUN echo "source /etc/bash_completion" >> ${_HOME_DIRECTORY}/.bashrc
+RUN echo "source /etc/bash_completion" >> ${_HOME_DIRECTORY}/.bashrc \
+    && echo 'export PHP_IDE_CONFIG="serverName=host.docker.internal"' >> ${_HOME_DIRECTORY}/.bashrc
 
 # MAGENTO CLI:
 RUN curl -sS https://accounts.magento.cloud/cli/installer | php
@@ -253,15 +273,15 @@ RUN ln -s /usr/local/bin/composer2 /usr/local/bin/composer
 ARG M2D_XDEBUG_IDE_KEY=PHPSTORM
 ENV M2D_XDEBUG_IDE_KEY=${M2D_XDEBUG_IDE_KEY:-PHPSTORM}
 RUN pecl install xdebug \
-    && echo ";zend_extension=xdebug.so" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini \
+    && echo "zend_extension=xdebug.so" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini \
     && echo "xdebug.idekey=$M2D_XDEBUG_IDE_KEY" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini \
     && echo "xdebug.client_host=host.docker.internal" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini \
     && echo "xdebug.mode=debug" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini \
     && echo "xdebug.start_with_request=yes" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini \
     && echo "xdebug.max_nesting_level=10000" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini \
+    && echo "xdebug.log_level=0" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini \
     && echo ";xdebug.log = /var/www/html/xdebug.log" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini \
-    && echo ";xdebug.log_level = 10" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini \
-    && echo ";xdebug.client_port = 9003" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini
+    && echo "xdebug.client_port = 9003" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini
 ## END OF IMAGE ADJUSTMENTS FOR PHP 8.x ##
 
 
@@ -306,6 +326,15 @@ FROM m2d_web_server_apache_php8x AS m2d_web_server_apache_php8.3
 RUN docker-php-ext-configure ftp --with-openssl-dir=/usr \
     && docker-php-ext-install ftp
 ## END OF IMAGE ADJUSTMENTS FOR PHP 8.3 ##
+
+## IMAGE ADJUSTEMNTS FOR PHP 8.4 ##
+FROM m2d_web_server_apache_php8x AS m2d_web_server_apache_php8.4
+# PHP EXTENSIONS GD:
+# --with-openssl-dir was removed from ext-ftp's configure options as of PHP 8.4
+# (OpenSSL is auto-detected instead); docker-php-ext-configure ftp needs no args here.
+RUN docker-php-ext-configure ftp \
+    && docker-php-ext-install ftp
+## END OF IMAGE ADJUSTMENTS FOR PHP 8.4 ##
 
 ## TARGET IMAGE ADJUSTEMNTS ##
 FROM m2d_web_server_apache_php${M2D_WEB_SERVER_PHP_VERSION} AS web_server

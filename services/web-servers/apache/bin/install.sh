@@ -1,14 +1,24 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 
+# Resolve this file's directory portably. This file is sourced by bin/m2d
+# (bash), but must also work when the caller's interpreter is zsh, which has no
+# BASH_SOURCE; the eval-guarded `%x` is hidden from bash's parser.
+if [ -n "${ZSH_VERSION:-}" ]; then
+    eval '_m2d_apache_install_self=${(%):-%x}'
+else
+    _m2d_apache_install_self="${BASH_SOURCE[0]:-$0}"
+fi
+M2D_APACHE_INSTALL_DIR=$(cd -- "$(dirname -- "$_m2d_apache_install_self")" &> /dev/null && pwd)
+
 function _m2d_install_apache_init_ahut_json ()
 {
     local confirm target_file
 
-    target_file="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd)/../etc/composer/auth.json"
+    target_file="$M2D_APACHE_INSTALL_DIR/../etc/composer/auth.json"
 
     if [[ -f "$target_file"  ]]; then
-        read -p 'You already have auth.json file generated for Magento2Docker. Do you want to keep it (y) or recreate it (n)? [y/n]: ' confirm
+        printf '%s' 'You already have auth.json file generated for Magento2Docker. Do you want to keep it (y) or recreate it (n)? [y/n]: ' >&2; read confirm
 
         if [[ $confirm == 'y' ]]; then
             return 0
@@ -19,7 +29,7 @@ function _m2d_install_apache_init_ahut_json ()
     fi
 
     if [[ -f ~/.composer/auth.json ]]; then
-        read -p 'Do you want to use your auth.json file from the host (~/.composer/auth.json)? [y/n]: ' confirm
+        printf '%s' 'Do you want to use your auth.json file from the host (~/.composer/auth.json)? [y/n]: ' >&2; read confirm
 
         if [[ $confirm == 'y' ]]; then
             cp ~/.composer/auth.json "$target_file"
@@ -28,12 +38,12 @@ function _m2d_install_apache_init_ahut_json ()
     fi
 
     echo 'You can use any existing auth.json file or you will be asked to provide public and private composer keys.'
-    read -p 'Do you want to use any existing auth.json file? [y/n]: ' confirm
+    printf '%s' 'Do you want to use any existing auth.json file? [y/n]: ' >&2; read confirm
     if [[ $confirm == 'y' ]]; then
         local auth_json_path
         while [[ ! -f "$target_file" ]]
         do
-            read -p 'Provide a path to auth.json file you want to use: ' auth_json_path
+            printf '%s' 'Provide a path to auth.json file you want to use: ' >&2; read auth_json_path
             auth_json_path=$(realpath "${auth_json_path/#\~/$HOME}" 2> /dev/null)
 
             echo "$auth_json_path"
@@ -43,7 +53,7 @@ function _m2d_install_apache_init_ahut_json ()
                 return 0
             fi
 
-            read -p "'$auth_json_path' doesn't exist! Do you want to try again? [y/n]: " confirm
+            printf '%s' "'$auth_json_path' doesn't exist! Do you want to try again? [y/n]: " >&2; read confirm
 
             if [[ $confirm == 'n' ]]; then
                 break
@@ -53,8 +63,8 @@ function _m2d_install_apache_init_ahut_json ()
 
     local username password file_content
     echo 'The auth.json file will be generated based on your public and private keys.'
-    read -p 'Provide a public key to repo.magento.com: ' username
-    read -p 'Provide a private key to repo.magento.com: ' password
+    printf '%s' 'Provide a public key to repo.magento.com: ' >&2; read username
+    printf '%s' 'Provide a private key to repo.magento.com: ' >&2; read password
 
     file_content=$(cat <<AUTH_JSON
 {
@@ -75,10 +85,10 @@ function _m2d_install_apache_init_git_config ()
 {
     local confirm target_file
 
-    target_file="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd)/../etc/git/gitconfig"
+    target_file="$M2D_APACHE_INSTALL_DIR/../etc/git/gitconfig"
 
     if [[ -f "$target_file"  ]]; then
-        read -p 'You already have a git config file created for Magento2Docker. Do you want to keep it? [y/n]: ' confirm
+        printf '%s' 'You already have a git config file created for Magento2Docker. Do you want to keep it? [y/n]: ' >&2; read confirm
 
         if [[ $confirm == 'y' ]]; then
             return 0
@@ -89,7 +99,7 @@ function _m2d_install_apache_init_git_config ()
     fi
 
     if [[ -f ~/.gitconfig ]]; then
-        read -p 'Do you want to use your current gitconfig file from the host (from ~/.gitconfig)? [y/n]: ' confirm
+        printf '%s' 'Do you want to use your current gitconfig file from the host (from ~/.gitconfig)? [y/n]: ' >&2; read confirm
 
         if [[ $confirm == 'y' ]]; then
             cp ~/.gitconfig "$target_file"
@@ -99,8 +109,8 @@ function _m2d_install_apache_init_git_config ()
 
     local email name file_content
     echo 'Generating minimal git configuration:'
-    read -p 'Provide your email address: ' email
-    read -p 'Provide your full name (name and surname): ' name
+    printf '%s' 'Provide your email address: ' >&2; read email
+    printf '%s' 'Provide your full name (name and surname): ' >&2; read name
 
     file_content=$(cat <<GITCONFIG
 [user]
@@ -116,12 +126,12 @@ GITCONFIG
 function _m2d_install_apache_init_certs ()
 {
     local confirm
-    local target_path="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd)/../etc/ssh"
+    local target_path="$M2D_APACHE_INSTALL_DIR/../etc/ssh"
 
     echo 'You may want to add your ssh configuration and keys to the web container, so you will be able to connect to external services like e.g. GithHub'
 
     if [[ -f ~/.ssh/config ]]; then
-        read -p 'Do you want to add SSH config file(s) from the host to the web container? [y/n]: ' confirm
+        printf '%s' 'Do you want to add SSH config file(s) from the host to the web container? [y/n]: ' >&2; read confirm
 
         if [[ $confirm == 'y' ]]; then
             cp ~/.ssh/config* "$target_path/"
@@ -129,14 +139,14 @@ function _m2d_install_apache_init_certs ()
     fi
 
     if [[ -f ~/.ssh/known_hosts ]]; then
-        read -p 'Do you want to add known_hosts file from the host to the web container? [y/n]: ' confirm
+        printf '%s' 'Do you want to add known_hosts file from the host to the web container? [y/n]: ' >&2; read confirm
 
         if [[ $confirm == 'y' ]]; then
             cp ~/.ssh/known_hosts "$target_path/"
         fi
     fi
 
-    read -p 'Do you want to add any of your SSH keys to the web container (you will be able to select which keys to add)? [y/n]: ' confirm
+    printf '%s' 'Do you want to add any of your SSH keys to the web container (you will be able to select which keys to add)? [y/n]: ' >&2; read confirm
 
     if [[ $confirm == 'n' ]]; then
         return 0
@@ -147,7 +157,7 @@ function _m2d_install_apache_init_certs ()
             continue
         fi
 
-        read -p "Add '$ssh_pub_key'? [y/n]: " confirm
+        printf '%s' "Add '$ssh_pub_key'? [y/n]: " >&2; read confirm
 
         if [[ $confirm != 'y' ]]; then
             continue

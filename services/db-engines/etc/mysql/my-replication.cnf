@@ -1,0 +1,7 @@
+[mysqld]
+## Replication — only COPY'd when M2D_ENABLE_DB_REPLICATION=yes (see db-engines/Dockerfile).
+## Binlogging has real disk/IO cost with no retention limit set here; a plain single-node
+## install (the default) must never pay for it.
+server-id                            = 1
+log-bin                              = mysql-bin
+binlog-format                        = ROW
