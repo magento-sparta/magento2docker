@@ -9,6 +9,7 @@ FROM php:${M2D_WEB_SERVER_PHP_VERSION}-apache-bullseye AS m2d_web_server_apache_
 RUN apt-get update \
     && apt-get install -y \
         apt-utils \
+        bsdextrautils \
         wget \
         libwebp-dev \
         libxpm-dev \
